@@ -83,6 +83,12 @@ Create a `.env` file in the same directory as the executable with the following 
     ```
     *A price is considered a major spike if above this percentile; triggers pre-charging.*
 
+- **Minimum price spike threshold:**
+    ```env
+    MIN_SPIKE_DIFFERENCE_CENTS=10.0
+    ```
+    *Only force-charge the battery if the detected price spike is significant enough to justify pre-charging the battery.*
+
 - **Enable battery control:**  
     ```env
     ENABLE_BATTERY_CONTROL=true

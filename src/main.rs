@@ -39,6 +39,7 @@ struct Config {
     lookahead_hours: i64,
     low_price_percentile: f64,
     high_spike_percentile: f64,
+    min_spike_difference_cents: f64,
     // Battery control settings
     enable_battery_control: bool,
     ssh_host: String,
@@ -205,17 +206,17 @@ fn run_price_analysis(
     let block_threshold = percentile(&mut todays_prices_values, config.block_price_percentile / 100.0);
     let low_price_threshold = percentile(&mut todays_prices_values, config.low_price_percentile / 100.0);
     let spike_threshold = percentile(&mut todays_prices_values, config.high_spike_percentile / 100.0);
-
+    
     log::info!(
         "Today's relative price thresholds: Low < {:.2}, Block > {:.2}, Spike > {:.2}",
         low_price_threshold, block_threshold, spike_threshold
     );
 
     let price_based_decision = if current_price_info.price > block_threshold {
-        log::debug!("Price-based decision: BLOCK. Current price {:.2} > threshold {:.2}.", current_price_info.price, block_threshold);
+        log::info!("Heatpump decision: BLOCK. Current price {:.2} > threshold {:.2}.", current_price_info.price, block_threshold);
         CompressorState::Blocked
     } else {
-        log::debug!("Price-based decision: ALLOW. Current price {:.2} <= threshold {:.2}.", current_price_info.price, block_threshold);
+        log::info!("Heatpump decision: ALLOW. Current price {:.2} <= threshold {:.2}.", current_price_info.price, block_threshold);
         CompressorState::Allowed
     };
 
@@ -223,14 +224,38 @@ fn run_price_analysis(
     let mut soc_decision = baseline_soc;
 
     if config.enable_battery_control {
+        // Find the highest price in the lookahead window to check for a spike.
         let lookahead_end_time = now + Duration::hours(config.lookahead_hours);
-        let upcoming_spike = prices.iter().any(|p| p.from >= now && p.from < lookahead_end_time && p.price > spike_threshold);
+        let max_future_price_info = prices
+            .iter()
+            .filter(|p| p.from >= now && p.from < lookahead_end_time)
+            .max_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut upcoming_spike_triggers_charge = false;
+        if let Some(max_price) = max_future_price_info {
+            let price_diff = max_price.price - current_price_info.price;
+            // A spike triggers a charge if it's above the percentile AND the difference is large enough.
+            if max_price.price > spike_threshold {
+                log::info!(
+                    "Detected upcoming spike of {:.2} at {}.",
+                    max_price.price,
+                    max_price.from.to_rfc3339()
+                );
+                if price_diff > config.min_spike_difference_cents {
+                    log::warn!(
+                        "Battery Decision: Force charge due to upcoming spike of {:.2} detected (diff: {:.2} > {:.2}).",
+                        max_price.price, price_diff, config.min_spike_difference_cents
+                    );
+                    upcoming_spike_triggers_charge = true;
+                }
+            }
+        }
 
         if current_price_info.price < low_price_threshold {
             log::warn!("Battery Decision: Force charge. Price {:.2} is below the {:.0}th percentile threshold of {:.2}.", current_price_info.price, config.low_price_percentile, low_price_threshold);
             soc_decision = config.force_charge_soc;
-        } else if upcoming_spike {
-            log::warn!("Battery Decision: Force charge. Upcoming spike above {:.2} detected in the next {} hours.", spike_threshold, config.lookahead_hours);
+        } else if upcoming_spike_triggers_charge {
+            // Already logged the reason above.
             soc_decision = config.force_charge_soc;
         } else {
             log::info!("Battery Decision: Use baseline SOC of {}%.", baseline_soc);
@@ -251,7 +276,7 @@ fn get_baseline_soc(config: &Config, now: DateTime<Utc>) -> u8 {
 /// Connects to the Victron system via SSH and sets the Minimum SOC.
 fn set_minimum_soc(config: &Config, soc: u8) -> Result<()> {
     log::info!(
-        "Attempting to set Minimum SOC to {}% on host {}",
+        "Set Minimum SOC to {}% on host {}",
         soc,
         config.ssh_host
     );
@@ -290,7 +315,7 @@ fn set_minimum_soc(config: &Config, soc: u8) -> Result<()> {
         ));
     }
 
-    log::info!("SSH command successful (exit code {}).", exit_status);
+    log::debug!("SSH command successful (exit code {}).", exit_status);
     Ok(())
 }
 
@@ -314,14 +339,14 @@ fn update_price_data(
     let tomorrow = today.succ_opt().context("Failed to calculate tomorrow's date")?;
 
     if !prices.iter().any(|p| p.from.date_naive() == today) {
-        log::info!("Fetching price data for today ({})", today);
+        log::debug!("Fetching price data for today ({})", today);
         prices.extend(
             fetch_prices_for_day(today, client)
                 .with_context(|| format!("Failed to fetch prices for {}", today))?,
         );
     }
     if !prices.iter().any(|p| p.from.date_naive() == tomorrow) {
-        log::info!("Fetching price data for tomorrow ({})", tomorrow);
+        log::debug!("Fetching price data for tomorrow ({})", tomorrow);
         prices.extend(
             fetch_prices_for_day(tomorrow, client)
                 .with_context(|| format!("Failed to fetch prices for {}", tomorrow))?,
@@ -365,7 +390,7 @@ fn control_relay(
         (CompressorState::Allowed, false) => "on",
     };
     let url = format!("http://{}/relay/0?turn={}", config.shelly_ip, action);
-    log::info!("Sending request to Shelly: {}", url);
+    log::debug!("Sending request to Shelly: {}", url);
     let response = client.get(&url).send()?;
     if !response.status().is_success() {
         return Err(anyhow::anyhow!(
@@ -388,6 +413,7 @@ fn load_config() -> Result<Config> {
         lookahead_hours: env::var("LOOKAHEAD_HOURS").unwrap_or("6".into()).parse()?,
         low_price_percentile: env::var("LOW_PRICE_PERCENTILE").unwrap_or("10.0".into()).parse()?,
         high_spike_percentile: env::var("HIGH_SPIKE_PERCENTILE").unwrap_or("95.0".into()).parse()?,
+        min_spike_difference_cents: env::var("MIN_SPIKE_DIFFERENCE_CENTS").unwrap_or("10.0".into()).parse()?,
         enable_battery_control: env::var("ENABLE_BATTERY_CONTROL").unwrap_or("true".into()).parse()?,
         ssh_host: env::var("SSH_HOST").context("SSH_HOST not set")?,
         ssh_user: env::var("SSH_USER").context("SSH_USER not set")?,
