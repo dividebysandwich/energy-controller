@@ -5,7 +5,7 @@ use serde::Deserialize;
 use ssh2::Session;
 use std::collections::VecDeque;
 use std::env;
-use std::io::prelude::*;
+use std::io::Read;
 use std::net::TcpStream;
 use std::thread::sleep;
 use std::time;
@@ -26,26 +26,29 @@ enum CompressorState {
 
 /// Holds all configuration loaded from environment variables.
 struct Config {
+    // General
+    check_interval: time::Duration,
     // Relay settings
     shelly_ip: String,
     relay_on_to_block: bool,
-    // Heatpump logic
+    // Relative Heatpump logic
+    block_price_percentile: f64,
+    max_continuous_block_minutes: i64,
+    min_rest_time_minutes: i64,
+    // Relative Battery logic
     lookahead_hours: i64,
-    block_slots: usize,
-    check_interval: time::Duration,
+    low_price_percentile: f64,
+    high_spike_percentile: f64,
     // Battery control settings
     enable_battery_control: bool,
     ssh_host: String,
     ssh_user: String,
     ssh_pass: String,
-    low_price_threshold: f64,
-    high_price_spike_threshold: f64,
     force_charge_soc: u8,
     summer_min_soc: u8,
     winter_min_soc: u8,
 }
 
-/// Main entry point for the application.
 fn main() -> Result<()> {
     // Initialize logging and load configuration
     env_logger::init();
@@ -65,55 +68,84 @@ fn main() -> Result<()> {
     let mut prices: VecDeque<PriceInfo> = VecDeque::new();
     // State variables to prevent unnecessary switching.
     let mut last_compressor_state = CompressorState::Allowed;
-    let mut last_soc_set: u8 = 0; // Use 0 to ensure the first real value is always set
+    let mut last_soc_set: u8 = 0;
+    let mut block_start_time: Option<DateTime<Utc>> = None;
+    let mut rest_until_time: Option<DateTime<Utc>> = None;
 
     // Initialize the relay to the 'Allowed' state on startup as a safe default.
-    if let Err(e) = control_relay(&config, CompressorState::Allowed, None, &client) {
+    if let Err(e) = control_relay(&config, CompressorState::Allowed, &client) {
         log::error!("Failed to initialize relay state on startup: {}", e);
     }
 
     // The main application loop.
     loop {
-        // Run a single logic cycle to get desired states for compressor and battery SOC.
-        match run_logic_cycle(&config, &mut prices, &client) {
-            Ok((desired_compressor_state, desired_soc)) => {
-                // --- Handle Compressor State ---
-                // Only send a command if the desired state has changed.
-                if desired_compressor_state != last_compressor_state {
-                    log::info!(
-                        "Compressor state change detected! Desired: {:?}",
-                        desired_compressor_state
-                    );
-                    match control_relay(
-                        &config,
-                        desired_compressor_state,
-                        Some(last_compressor_state),
-                        &client,
-                    ) {
-                        Ok(_) => {
-                            log::info!("Successfully changed relay state.");
-                            last_compressor_state = desired_compressor_state;
-                        }
-                        Err(e) => log::error!("Failed to update relay state: {}", e),
-                        // We don't update last_state, so it will retry on the next cycle.
+        let now = Utc::now();
+        match run_price_analysis(&config, &mut prices, &client, now) {
+            Ok((price_based_decision, desired_soc)) => {
+                let mut final_compressor_decision = price_based_decision;
+
+                // Stateful Timing Logic
+                // Check if we are in a mandatory rest period.
+                if let Some(rest_end) = rest_until_time {
+                    if now < rest_end {
+                        log::info!("In mandatory rest period until {}. Forcing ALLOW.", rest_end.to_rfc3339());
+                        final_compressor_decision = CompressorState::Allowed;
+                    } else {
+                        log::info!("Rest period ended at {}.", rest_end.to_rfc3339());
+                        rest_until_time = None;
                     }
-                } else {
-                    log::debug!(
-                        "No compressor state change needed. Current state is {:?}",
-                        last_compressor_state
-                    );
                 }
 
-                // --- Handle Battery SOC State ---
+                // Check if the maximum block time has been exceeded.
+                if let Some(block_start) = block_start_time {
+                    let block_duration = now.signed_duration_since(block_start);
+                    if block_duration > Duration::minutes(config.max_continuous_block_minutes) {
+                        log::warn!(
+                            "Max block time of {}m exceeded (blocked for {}m). Forcing ALLOW.",
+                            config.max_continuous_block_minutes,
+                            block_duration.num_minutes()
+                        );
+                        final_compressor_decision = CompressorState::Allowed;
+                    }
+                }
+
+                // Update Timers on State Change
+                if final_compressor_decision != last_compressor_state {
+                    match (last_compressor_state, final_compressor_decision) {
+                        (CompressorState::Allowed, CompressorState::Blocked) => {
+                            log::info!("State changing: ALLOWED -> BLOCKED. Starting block timer.");
+                            block_start_time = Some(now);
+                        }
+                        (CompressorState::Blocked, CompressorState::Allowed) => {
+                            log::info!("State changing: BLOCKED -> ALLOWED. Starting rest timer.");
+                            block_start_time = None;
+                            rest_until_time = Some(now + Duration::minutes(config.min_rest_time_minutes));
+                        }
+                        _ => {} // Should not happen
+                    }
+                }
+
+                // Send Relay Command
+                if final_compressor_decision != last_compressor_state {
+                    log::info!("Final decision -> {:?}", final_compressor_decision);
+                    match control_relay(&config, final_compressor_decision, &client) {
+                        Ok(_) => {
+                            log::info!("Successfully changed relay state.");
+                            last_compressor_state = final_compressor_decision;
+                        }
+                        Err(e) => log::error!("Failed to update relay state: {}", e),
+                    }
+                }
+
+                // Handle Battery SOC State
                 if config.enable_battery_control && desired_soc != last_soc_set {
-                    log::info!("Battery SOC change detected! Desired Min SOC: {}%", desired_soc);
+                    log::info!("Battery SOC change -> {}%", desired_soc);
                     match set_minimum_soc(&config, desired_soc) {
                         Ok(_) => {
                             log::info!("Successfully set new Minimum SOC.");
                             last_soc_set = desired_soc;
                         }
                         Err(e) => log::error!("Failed to set Minimum SOC via SSH: {:#}", e),
-                        // We don't update last_soc_set, so it will retry on the next cycle.
                     }
                 }
             }
@@ -124,125 +156,88 @@ fn main() -> Result<()> {
                     e
                 );
                 // Failsafe: allow compressor to run if logic fails.
-                if last_compressor_state == CompressorState::Blocked {
+                 if last_compressor_state == CompressorState::Blocked {
                     if let Err(e_failsafe) = control_relay(
                         &config,
                         CompressorState::Allowed,
-                        Some(last_compressor_state),
                         &client,
                     ) {
                         log::error!("Failed to set failsafe 'Allowed' state: {}", e_failsafe);
                     } else {
                         last_compressor_state = CompressorState::Allowed;
+                        block_start_time = None; // Reset timer on failsafe
                         log::warn!("Set relay to failsafe 'Allowed' state due to error.");
                     }
                 }
             }
         }
-
         log::debug!("Sleeping for {:?}...", config.check_interval);
         sleep(config.check_interval);
     }
 }
 
-/// Executes one iteration of the control logic for both compressor and battery.
-/// Returns a tuple: (desired_compressor_state, desired_minimum_soc)
-fn run_logic_cycle(
+/// Executes the price analysis part of the logic.
+fn run_price_analysis(
     config: &Config,
     prices: &mut VecDeque<PriceInfo>,
     client: &Client,
+    now: DateTime<Utc>,
 ) -> Result<(CompressorState, u8)> {
-    let now = Utc::now();
-
-    // Ensure we have price data for today and tomorrow.
     update_price_data(prices, now, client).context("Failed to update price data")?;
 
-    // Find the current 15-minute price slot.
     let current_price_info = prices
         .iter()
         .find(|p| now >= p.from && now < p.from + Duration::minutes(15))
-        .context("Could not find current price information. Data might be stale or incomplete.")?;
+        .context("Could not find current price information")?;
 
-    log::info!(
-        "Current time: {}. Current price: {:.2} cents/kWh.",
-        now.to_rfc3339(),
-        current_price_info.price
-    );
+    log::info!("Current price: {:.2} cents/kWh.", current_price_info.price);
 
-    // Get all price slots within the configured lookahead window.
-    let lookahead_end_time = now + Duration::hours(config.lookahead_hours);
-    let future_prices_full: Vec<&PriceInfo> = prices
+    let mut todays_prices_values: Vec<f64> = prices
         .iter()
-        .filter(|p| p.from >= now && p.from < lookahead_end_time)
+        .filter(|p| p.from.date_naive() == now.date_naive())
+        .map(|p| p.price)
         .collect();
 
-    if future_prices_full.is_empty() {
-        log::warn!("Lookahead window is empty. Allowing compressor and using baseline SOC.");
-        let baseline_soc = get_baseline_soc(config, now);
-        return Ok((CompressorState::Allowed, baseline_soc));
+    if todays_prices_values.len() < 4 {
+        return Err(anyhow::anyhow!("Not enough price data for today to make a relative decision."));
     }
 
-    let mut future_prices_values: Vec<f64> =
-        future_prices_full.iter().map(|p| p.price).collect();
+    let block_threshold = percentile(&mut todays_prices_values, config.block_price_percentile / 100.0);
+    let low_price_threshold = percentile(&mut todays_prices_values, config.low_price_percentile / 100.0);
+    let spike_threshold = percentile(&mut todays_prices_values, config.high_spike_percentile / 100.0);
 
-    // Sort the prices in the lookahead window from most expensive to least expensive.
-    future_prices_values.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    log::info!(
+        "Today's relative price thresholds: Low < {:.2}, Block > {:.2}, Spike > {:.2}",
+        low_price_threshold, block_threshold, spike_threshold
+    );
 
-
-    // Find the price that acts as our threshold. If the current price is higher than or equal to this, we should block.
-    // For example, if BLOCK_SLOTS is 4, this will be the 4th most expensive price.
-    let threshold_price = future_prices_values
-        .get(config.block_slots.saturating_sub(1))
-        .unwrap_or(&future_prices_values[future_prices_values.len() - 1]);
-
-    // The core decision: block if the current price is among the most expensive in the near future.
-    let compressor_decision = if current_price_info.price >= *threshold_price {
-        log::warn!(
-            "Decision: BLOCK. Current price {:.2} is at or above threshold {:.2}.",
-            current_price_info.price,
-            threshold_price
-        );
+    let price_based_decision = if current_price_info.price > block_threshold {
+        log::debug!("Price-based decision: BLOCK. Current price {:.2} > threshold {:.2}.", current_price_info.price, block_threshold);
         CompressorState::Blocked
     } else {
-        log::info!(
-            "Decision: ALLOW. Current price {:.2} is below threshold {:.2}.",
-            current_price_info.price,
-            threshold_price
-        );
+        log::debug!("Price-based decision: ALLOW. Current price {:.2} <= threshold {:.2}.", current_price_info.price, block_threshold);
         CompressorState::Allowed
     };
 
-    // --- Battery SOC Logic ---
     let baseline_soc = get_baseline_soc(config, now);
     let mut soc_decision = baseline_soc;
 
     if config.enable_battery_control {
-        let upcoming_spike = future_prices_full
-            .iter()
-            .any(|p| p.price > config.high_price_spike_threshold);
+        let lookahead_end_time = now + Duration::hours(config.lookahead_hours);
+        let upcoming_spike = prices.iter().any(|p| p.from >= now && p.from < lookahead_end_time && p.price > spike_threshold);
 
-        if current_price_info.price < config.low_price_threshold {
-            log::warn!(
-                "Battery Decision: Force charge. Price {:.2} is below threshold {}.",
-                current_price_info.price,
-                config.low_price_threshold
-            );
+        if current_price_info.price < low_price_threshold {
+            log::warn!("Battery Decision: Force charge. Price {:.2} is below the {:.0}th percentile threshold of {:.2}.", current_price_info.price, config.low_price_percentile, low_price_threshold);
             soc_decision = config.force_charge_soc;
         } else if upcoming_spike {
-            log::warn!(
-                "Battery Decision: Force charge. Upcoming spike > {:.2} detected.",
-                config.high_price_spike_threshold
-            );
+            log::warn!("Battery Decision: Force charge. Upcoming spike above {:.2} detected in the next {} hours.", spike_threshold, config.lookahead_hours);
             soc_decision = config.force_charge_soc;
         } else {
-            log::info!(
-                "Battery Decision: Use baseline SOC of {}%.",
-                baseline_soc
-            );
+            log::info!("Battery Decision: Use baseline SOC of {}%.", baseline_soc);
         }
     }
 
-    Ok((compressor_decision, soc_decision))
+    Ok((price_based_decision, soc_decision))
 }
 
 /// Determines the baseline Minimum SOC based on the season.
@@ -298,8 +293,6 @@ fn set_minimum_soc(config: &Config, soc: u8) -> Result<()> {
     log::info!("SSH command successful (exit code {}).", exit_status);
     Ok(())
 }
-
-// --- Functions from previous steps (unchanged or with minor updates) ---
 
 /// Manages the local price data cache, fetching new data when needed.
 fn update_price_data(
@@ -363,7 +356,6 @@ fn fetch_prices_for_day(day: NaiveDate, client: &Client) -> Result<Vec<PriceInfo
 fn control_relay(
     config: &Config,
     desired_state: CompressorState,
-    _last_state: Option<CompressorState>,
     client: &Client,
 ) -> Result<()> {
     let action = match (desired_state, config.relay_on_to_block) {
@@ -388,32 +380,47 @@ fn control_relay(
 fn load_config() -> Result<Config> {
     Ok(Config {
         shelly_ip: env::var("SHELLY_IP").context("SHELLY_IP not set")?,
-        relay_on_to_block: env::var("RELAY_ON_TO_BLOCK").unwrap_or("true".into()).parse()?,
-        lookahead_hours: env::var("LOOKAHEAD_HOURS").unwrap_or("4".into()).parse()?,
-        block_slots: env::var("BLOCK_SLOTS").unwrap_or("4".into()).parse()?,
-        check_interval: time::Duration::from_secs(
-            env::var("CHECK_INTERVAL_MINUTES").unwrap_or("5".into()).parse::<u64>()? * 60,
-        ),
+        relay_on_to_block: env::var("RELAY_ON_TO_BLOCK").unwrap_or("false".into()).parse()?,
+        check_interval: time::Duration::from_secs(env::var("CHECK_INTERVAL_MINUTES").unwrap_or("5".into()).parse::<u64>()? * 60),
+        block_price_percentile: env::var("BLOCK_PRICE_PERCENTILE").unwrap_or("75.0".into()).parse()?,
+        max_continuous_block_minutes: env::var("MAX_CONTINUOUS_BLOCK_MINUTES").unwrap_or("120".into()).parse()?,
+        min_rest_time_minutes: env::var("MIN_REST_TIME_MINUTES").unwrap_or("60".into()).parse()?,
+        lookahead_hours: env::var("LOOKAHEAD_HOURS").unwrap_or("6".into()).parse()?,
+        low_price_percentile: env::var("LOW_PRICE_PERCENTILE").unwrap_or("10.0".into()).parse()?,
+        high_spike_percentile: env::var("HIGH_SPIKE_PERCENTILE").unwrap_or("95.0".into()).parse()?,
         enable_battery_control: env::var("ENABLE_BATTERY_CONTROL").unwrap_or("true".into()).parse()?,
         ssh_host: env::var("SSH_HOST").context("SSH_HOST not set")?,
         ssh_user: env::var("SSH_USER").context("SSH_USER not set")?,
         ssh_pass: env::var("SSH_PASS").context("SSH_PASS not set")?,
-        low_price_threshold: env::var("LOW_PRICE_THRESHOLD").unwrap_or("4.0".into()).parse()?,
-        high_price_spike_threshold: env::var("HIGH_PRICE_SPIKE_THRESHOLD").unwrap_or("40.0".into()).parse()?,
-        force_charge_soc: env::var("FORCE_CHARGE_SOC").unwrap_or("95".into()).parse()?,
+        force_charge_soc: env::var("FORCE_CHARGE_SOC").unwrap_or("80".into()).parse()?,
         summer_min_soc: env::var("SUMMER_MIN_SOC").unwrap_or("10".into()).parse()?,
         winter_min_soc: env::var("WINTER_MIN_SOC").unwrap_or("20".into()).parse()?,
     })
 }
 
-/// Provides a simple string summary of the configuration for logging.
+/// Provides a summary of the loaded configuration for logging.
 fn config_summary(config: &Config) -> String {
     format!(
-        "Relay IP: {}, Lookahead: {}h, Block Slots: {}, Battery Control Enabled: {}",
-        config.shelly_ip,
-        config.lookahead_hours,
-        config.block_slots,
-        config.enable_battery_control
+        "Block Percentile: {:.1}%, Max Block: {}m, Min Rest: {}m, Battery Control: {}",
+        config.block_price_percentile, config.max_continuous_block_minutes, config.min_rest_time_minutes, config.enable_battery_control
     )
+}
+
+/// Calculates the percentile value from a slice of f64 values.
+/// `percentile` should be between 0.0 and 1.0 (e.g., 0.75 for 75th percentile).
+fn percentile(data: &mut [f64], percentile: f64) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let rank = percentile * (data.len() - 1) as f64;
+    let lower = rank.floor() as usize;
+    let upper = rank.ceil() as usize;
+    if lower == upper {
+        data[lower]
+    } else {
+        let weight = rank - lower as f64;
+        data[lower] * (1.0 - weight) + data[upper] * weight
+    }
 }
 

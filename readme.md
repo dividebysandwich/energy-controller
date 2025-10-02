@@ -25,100 +25,89 @@ Create a `.env` file in the same directory as the executable with the following 
     SHELLY_IP="YOUR_SHELLY_IP_HERE"
     ```
 
+- **Relay operation mode:**
+    ```env
+    RELAY_ON_TO_BLOCK=false
+    ```
+    *Whether the relay should be switched ON in order to inhibit heat pump operation. If set to false, relay will be switched ON to allow, and OFF to inhibit heat pump operation.*
+
 ---
 
-### **Heat Pump Logic Configuration**
+### **General Settings**
 
-- **Hours to look ahead when deciding whether to block the compressor:**  
-    ```env
-    LOOKAHEAD_HOURS=4
-    ```
-
-- **Number of 15-minute slots to block within the lookahead window:**  
-    ```env
-    BLOCK_SLOTS=4
-    ```
-
-- **How often the program checks the price and updates the state (in minutes):**  
+- **Check interval (minutes):**  
     ```env
     CHECK_INTERVAL_MINUTES=5
     ```
 
-- **Set to "true" if your relay needs to be ON to BLOCK the heatpump:**  
+---
+
+### **Heat Pump Control**
+
+- **Block price percentile:**  
     ```env
-    RELAY_ON_TO_BLOCK=false
+    BLOCK_PRICE_PERCENTILE=75.0
+    ```
+    *Blocks the heat pump if the current price is in the most expensive 25% of the day.*
+
+- **Maximum continuous block time (minutes):**  
+    ```env
+    MAX_CONTINUOUS_BLOCK_MINUTES=120
     ```
 
-
-The maximum duration for the heatpump being forced OFF is controlled by the interaction between two parameters:
-
-    LOOKAHEAD_HOURS
-
-    BLOCK_SLOTS
-
-At any given moment, the program looks ahead for the duration of LOOKAHEAD_HOURS (default is 4 hours). Within that window, it identifies the BLOCK_SLOTS number of most expensive 15-minute intervals (default is 4 slots).
-
-The compressor is only suppressed if the current time falls into one of those most expensive slots.
-
-Using the default settings, this means that within any 4-hour sliding window, the compressor can be forced off for a maximum of 4 slots x 15 minutes/slot = 60 minutes.
-
-This mechanism effectively prevents the heat pump from being turned off for too long. If a high-price period lasts for many hours, the "lookahead" window will eventually contain only high prices, and the logic will allow the compressor to run because the current price is no longer an extreme outlier within that window.
+- **Minimum rest time after block (minutes):**  
+    ```env
+    MIN_REST_TIME_MINUTES=60
+    ```
+    *After a block period ends, the heat pump must run for this duration before it can be blocked again.*
 
 ---
 
-### **Battery SOC Control Configuration**
+### **Battery SOC Control**
 
-- **Enable or disable the battery SOC control feature:**  
+- **Lookahead window (hours):**  
+    ```env
+    LOOKAHEAD_HOURS=6
+    ```
+    *Number of hours to look ahead for price spikes.*
+
+- **Low price percentile for charging:**  
+    ```env
+    LOW_PRICE_PERCENTILE=10.0
+    ```
+    *Force battery charging if the price is in the cheapest 10% of the day.*
+
+- **High spike percentile:**  
+    ```env
+    HIGH_SPIKE_PERCENTILE=95.0
+    ```
+    *A price is considered a major spike if above this percentile; triggers pre-charging.*
+
+- **Enable battery control:**  
     ```env
     ENABLE_BATTERY_CONTROL=true
     ```
 
----
-
-### **SSH Credentials for the Victron / Battery System**
-
-- **SSH host (example):**  
+- **Victron SSH connection:**  
     ```env
-    SSH_HOST="victron.local"
-    SSH_HOST="192.168.1.200"
     SSH_HOST="victron"
-    ```
-
-- **SSH user:**  
-    ```env
     SSH_USER="root"
-    ```
-
-- **SSH password:**  
-    ```env
     SSH_PASS="password"
     ```
 
----
-
-### **Battery Logic Parameters**
-
-- **Price in cents/kWh below which to force battery charging:**  
+- **Force charge SOC (%):**  
     ```env
-    LOW_PRICE_THRESHOLD=4.0
+    FORCE_CHARGE_SOC=80
     ```
 
-- **Price in cents/kWh considered a major spike (pre-charge if detected):**  
-    ```env
-    HIGH_PRICE_SPIKE_THRESHOLD=40.0
-    ```
-
-- **Target Minimum SOC (%) when force-charging:**  
-    ```env
-    FORCE_CHARGE_SOC=95
-    ```
-
-- **Baseline Minimum SOC (%) for Summer months (April–September):**  
+- **Minimum SOC for Summer (April–September):**  
     ```env
     SUMMER_MIN_SOC=10
     ```
 
-- **Baseline Minimum SOC (%) for Winter months (October–March):**  
+- **Minimum SOC for Winter (October–March):**  
     ```env
     WINTER_MIN_SOC=20
     ```
+
+---
