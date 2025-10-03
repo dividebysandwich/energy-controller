@@ -136,7 +136,7 @@ fn main() -> Result<()> {
                     log::info!("Final decision -> {:?}", final_compressor_decision);
                     match control_relay(&config, final_compressor_decision, &client) {
                         Ok(_) => {
-                            log::info!("Successfully changed relay state.");
+                            log::debug!("Successfully changed relay state.");
                             last_compressor_state = final_compressor_decision;
                         }
                         Err(e) => log::error!("Failed to update relay state: {}", e),
@@ -148,7 +148,7 @@ fn main() -> Result<()> {
                     log::info!("Battery SOC change -> {}%", desired_soc);
                     match set_minimum_soc(&config, desired_soc) {
                         Ok(_) => {
-                            log::info!("Successfully set new Minimum SOC.");
+                            log::debug!("Successfully set new Minimum SOC.");
                             last_soc_set = desired_soc;
                         }
                         Err(e) => log::error!("Failed to set Minimum SOC via SSH: {:#}", e),
@@ -280,7 +280,7 @@ fn get_baseline_soc(config: &Config, now: DateTime<Utc>) -> u8 {
 
 /// Connects to the Victron system via SSH and sets the Minimum SOC.
 fn set_minimum_soc(config: &Config, soc: u8) -> Result<()> {
-    log::info!(
+    log::debug!(
         "Set Minimum SOC to {}% on host {}",
         soc,
         config.ssh_host
