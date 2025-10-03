@@ -85,6 +85,11 @@ fn main() -> Result<()> {
             Ok((price_based_decision, desired_soc)) => {
                 let mut final_compressor_decision = price_based_decision;
 
+                // Reset block timer if price-based decision allows running.
+                if price_based_decision == CompressorState::Allowed {
+                    block_start_time = None;
+                }
+
                 // Stateful Timing Logic
                 // Check if we are in a mandatory rest period.
                 if let Some(rest_end) = rest_until_time {
