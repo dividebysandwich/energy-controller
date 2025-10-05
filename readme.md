@@ -1,5 +1,7 @@
 # Energy Controller
 
+<img width="1372" height="768" alt="image" src="https://github.com/user-attachments/assets/c083933c-abd0-46f6-aaed-edb9e9f91862" />
+
 This program controls a Shelly Plus 1 relay to manage a heat pump based on electricity prices from the EPEX market index. 
 It can also interface with a Victron battery system to optimize battery usage based on current and future price data.
 
