@@ -1,14 +1,32 @@
 use anyhow::{Context, Result};
 use chrono::{Datelike, DateTime, Duration, NaiveDate, Utc};
+use chrono_tz::Tz;
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use reqwest::blocking::Client;
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    symbols,
+    text::{Span, Line},
+    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph},
+    Frame, Terminal,
+};
 use serde::Deserialize;
 use ssh2::Session;
-use std::collections::VecDeque;
-use std::env;
-use std::io::Read;
-use std::net::TcpStream;
-use std::thread::sleep;
-use std::time;
+use std::{
+    collections::VecDeque,
+    env,
+    io::{self, prelude::*},
+    net::TcpStream,
+    sync::mpsc,
+    thread,
+    time,
+};
 
 /// Represents a single price point from the API.
 #[derive(Deserialize, Debug, Clone)]
@@ -50,224 +68,343 @@ struct Config {
     winter_min_soc: u8,
 }
 
+/// Holds all the data needed for the UI to render a frame.
+#[derive(Clone, Debug)]
+struct AppState {
+    prices: Vec<PriceInfo>,
+    current_price: f64,
+    block_threshold: f64,
+    low_price_threshold: f64,
+    spike_threshold: f64,
+    compressor_decision: CompressorState,
+    soc_decision: u8,
+    status_message: String,
+}
+
+
 fn main() -> Result<()> {
-    // Initialize logging and load configuration
-    env_logger::init();
     dotenv::dotenv().ok();
     let config = load_config()?;
+    let (tx, rx) = mpsc::channel::<AppState>(); // Channel for logic thread to send data to UI thread
+    
+    thread::spawn(move || {
+        // Build a reusable HTTP client that uses rustls for TLS.
+        let client = Client::builder().use_rustls_tls().build().unwrap();
+        // A double-ended queue to hold price data for today and tomorrow.
+        let mut prices: VecDeque<PriceInfo> = VecDeque::new();
+        // State variables to prevent unnecessary switching.
+        let mut last_compressor_state = CompressorState::Allowed;
+        let mut last_soc_set: u8 = 0;
+        let mut block_start_time: Option<DateTime<Utc>> = None;
+        let mut rest_until_time: Option<DateTime<Utc>> = None;
 
-    log::info!("Starting heatpump controller...");
-    log::info!("Configuration loaded: {}", config_summary(&config));
+        // Initialize the relay to the 'Allowed' state on startup as a safe default.
+        if let Err(e) = control_relay(&config, CompressorState::Allowed, &client) {
+            // Log this error somewhere? For now, we ignore it.
+             let _ = tx.send(AppState::new_with_status(format!("Startup relay error: {}", e)));
+        }
 
-    // Build a reusable HTTP client that uses rustls for TLS.
-    let client = Client::builder()
-        .use_rustls_tls()
-        .build()
-        .context("Failed to build HTTP client")?;
+        loop {
+            let now = Utc::now();
+            let result = run_price_analysis(&config, &mut prices, &client, now);
+            
+            match result {
+                Ok((price_based_decision, desired_soc, thresholds)) => {
+                    let mut final_compressor_decision = price_based_decision;
+                    let mut status_message = String::from("OK");
 
-    // A double-ended queue to hold price data for today and tomorrow.
-    let mut prices: VecDeque<PriceInfo> = VecDeque::new();
-    // State variables to prevent unnecessary switching.
-    let mut last_compressor_state = CompressorState::Allowed;
-    let mut last_soc_set: u8 = 0;
-    let mut block_start_time: Option<DateTime<Utc>> = None;
-    let mut rest_until_time: Option<DateTime<Utc>> = None;
-
-    // Initialize the relay to the 'Allowed' state on startup as a safe default.
-    if let Err(e) = control_relay(&config, CompressorState::Allowed, &client) {
-        log::error!("Failed to initialize relay state on startup: {}", e);
-    }
-
-    // The main application loop.
-    loop {
-        let now = Utc::now();
-        match run_price_analysis(&config, &mut prices, &client, now) {
-            Ok((price_based_decision, desired_soc)) => {
-                let mut final_compressor_decision = price_based_decision;
-
-                // Reset block timer if price-based decision allows running.
-                if price_based_decision == CompressorState::Allowed {
-                    block_start_time = None;
-                }
-
-                // Stateful Timing Logic
-                // Check if we are in a mandatory rest period.
-                if let Some(rest_end) = rest_until_time {
-                    if now < rest_end {
-                        log::info!("In mandatory rest period until {}. Forcing ALLOW.", rest_end.to_rfc3339());
-                        final_compressor_decision = CompressorState::Allowed;
-                    } else {
-                        log::info!("Rest period ended at {}.", rest_end.to_rfc3339());
-                        rest_until_time = None;
+                    // Reset block timer if price-based decision allows running.
+                    if price_based_decision == CompressorState::Allowed {
+                        block_start_time = None;
                     }
-                }
 
-                // Check if the maximum block time has been exceeded.
-                if let Some(block_start) = block_start_time {
-                    let block_duration = now.signed_duration_since(block_start);
-                    if block_duration > Duration::minutes(config.max_continuous_block_minutes) {
-                        log::warn!(
-                            "Max block time of {}m exceeded (blocked for {}m). Forcing ALLOW.",
-                            config.max_continuous_block_minutes,
-                            block_duration.num_minutes()
-                        );
-                        final_compressor_decision = CompressorState::Allowed;
-                    }
-                }
-
-                // Update Timers on State Change
-                if final_compressor_decision != last_compressor_state {
-                    match (last_compressor_state, final_compressor_decision) {
-                        (CompressorState::Allowed, CompressorState::Blocked) => {
-                            log::info!("State changing: ALLOWED -> BLOCKED. Starting block timer.");
-                            block_start_time = Some(now);
+                    // Timing logic overrides
+                    if let Some(rest_end) = rest_until_time {
+                        if now < rest_end {
+                            status_message = format!("In mandatory rest period until {}", rest_end.with_timezone(&Tz::CET).format("%H:%M"));
+                            final_compressor_decision = CompressorState::Allowed;
+                        } else {
+                            rest_until_time = None;
                         }
-                        (CompressorState::Blocked, CompressorState::Allowed) => {
-                            log::info!("State changing: BLOCKED -> ALLOWED. Starting rest timer.");
+                    }
+                    // Check if the maximum block time has been exceeded.
+                    if let Some(block_start) = block_start_time {
+                         let block_duration = now.signed_duration_since(block_start);
+                         if block_duration > Duration::minutes(config.max_continuous_block_minutes) {
+                            status_message = format!("Max block time exceeded ({}m)", block_duration.num_minutes());
+                            final_compressor_decision = CompressorState::Allowed;
+                        }
+                    }
+
+                    // Update Timers on State Change
+                    if final_compressor_decision != last_compressor_state {
+                        match (last_compressor_state, final_compressor_decision) {
+                            (CompressorState::Allowed, CompressorState::Blocked) => block_start_time = Some(now),
+                            (CompressorState::Blocked, CompressorState::Allowed) => {
+                                block_start_time = None;
+                                rest_until_time = Some(now + Duration::minutes(config.min_rest_time_minutes));
+                            },
+                            _ => {}
+                        }
+                    }
+                    
+                    // Send commands if state changed
+                    if final_compressor_decision != last_compressor_state {
+                        if let Err(e) = control_relay(&config, final_compressor_decision, &client) {
+                             let _ = tx.send(AppState::new_with_status(format!("Relay control error: {}", e)));
+                        }
+                    }
+                    last_compressor_state = final_compressor_decision;
+
+                    // Handle Battery SOC State
+                    if config.enable_battery_control && desired_soc != last_soc_set {
+                        if let Err(e) = set_minimum_soc(&config, desired_soc) {
+                             let _ = tx.send(AppState::new_with_status(format!("SSH error: {}", e)));
+                        }
+                        last_soc_set = desired_soc;
+                    }
+
+                    // Send complete state to UI thread
+                    let app_state = AppState {
+                        prices: prices.iter().cloned().collect(),
+                        current_price: thresholds.current_price,
+                        block_threshold: thresholds.block_threshold,
+                        low_price_threshold: thresholds.low_price_threshold,
+                        spike_threshold: thresholds.spike_threshold,
+                        compressor_decision: final_compressor_decision,
+                        soc_decision: desired_soc,
+                        status_message,
+                    };
+                    if tx.send(app_state).is_err() { break; } // Stop if UI thread has panicked
+                },
+                Err(e) => {
+                    // On error, send status and ensure failsafe state
+                    if last_compressor_state == CompressorState::Blocked {
+                        if control_relay(&config, CompressorState::Allowed, &client).is_ok() {
+                            last_compressor_state = CompressorState::Allowed;
                             block_start_time = None;
-                            rest_until_time = Some(now + Duration::minutes(config.min_rest_time_minutes));
                         }
-                        _ => {} // Should not happen
                     }
-                }
-
-                // Send Relay Command
-                if final_compressor_decision != last_compressor_state {
-                    log::info!("Final decision -> {:?}", final_compressor_decision);
-                    match control_relay(&config, final_compressor_decision, &client) {
-                        Ok(_) => {
-                            log::debug!("Successfully changed relay state.");
-                            last_compressor_state = final_compressor_decision;
-                        }
-                        Err(e) => log::error!("Failed to update relay state: {}", e),
-                    }
-                }
-
-                // Handle Battery SOC State
-                if config.enable_battery_control && desired_soc != last_soc_set {
-                    log::info!("Battery SOC change -> {}%", desired_soc);
-                    match set_minimum_soc(&config, desired_soc) {
-                        Ok(_) => {
-                            log::debug!("Successfully set new Minimum SOC.");
-                            last_soc_set = desired_soc;
-                        }
-                        Err(e) => log::error!("Failed to set Minimum SOC via SSH: {:#}", e),
-                    }
+                    if tx.send(AppState::new_with_status(format!("Error: {}", e))).is_err() { break; }
                 }
             }
-            Err(e) => {
-               // Using {:#} with anyhow::Error prints the full error chain for better debugging.
-               log::error!(
-                    "An error occurred in the logic cycle: {:#}. Will retry.",
-                    e
-                );
-                // Failsafe: allow compressor to run if logic fails.
-                 if last_compressor_state == CompressorState::Blocked {
-                    if let Err(e_failsafe) = control_relay(
-                        &config,
-                        CompressorState::Allowed,
-                        &client,
-                    ) {
-                        log::error!("Failed to set failsafe 'Allowed' state: {}", e_failsafe);
-                    } else {
-                        last_compressor_state = CompressorState::Allowed;
-                        block_start_time = None; // Reset timer on failsafe
-                        log::warn!("Set relay to failsafe 'Allowed' state due to error.");
-                    }
+            thread::sleep(config.check_interval);
+        }
+    });
+
+    // Setup TUI
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Run UI Loop
+    let mut app_state: Option<AppState> = None;
+    loop {
+        // Update state if new data is available
+        if let Ok(new_state) = rx.try_recv() {
+            app_state = Some(new_state);
+        }
+
+        terminal.draw(|f| ui(f, app_state.as_ref()))?;
+
+        if crossterm::event::poll(time::Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('q') {
+                    break;
                 }
             }
         }
-        log::debug!("Sleeping for {:?}...", config.check_interval);
-        sleep(config.check_interval);
     }
+
+    // Restore Terminal
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    Ok(())
 }
 
-/// Executes the price analysis part of the logic.
+
+// UI Rendering
+
+fn ui(f: &mut Frame, app_state: Option<&AppState>) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
+        .split(f.area());
+    
+    let top_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+        .split(chunks[1]);
+
+    // --- Chart ---
+    let chart_block = Block::default().title("Price Data (Today)").borders(Borders::ALL);
+    f.render_widget(chart_block, chunks[0]);
+
+    if let Some(state) = app_state {
+        let (x_bounds, y_bounds, price_data, line_data) = prepare_chart_data(state);
+
+        let datasets = vec![
+            Dataset::default()
+                .name("Price")
+                .marker(symbols::Marker::Dot)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::Cyan))
+                .data(&price_data),
+            Dataset::default()
+                .name("Now")
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::Yellow))
+                .data(&line_data),
+        ];
+
+        let chart = Chart::new(datasets)
+            .x_axis(
+                Axis::default()
+                    .title("Time (CET)")
+                    .style(Style::default().fg(Color::Gray))
+                    .bounds(x_bounds)
+                    .labels(
+                        x_bounds
+                            .iter()
+                            .map(|&t| {
+                                Span::from(
+                                    DateTime::from_timestamp(t as i64, 0)
+                                        .unwrap()
+                                        .with_timezone(&Tz::CET)
+                                        .format("%H:%M")
+                                        .to_string(),
+                                )
+                            })
+                            .collect::<Vec<Span>>()
+                    ),
+            )
+            .y_axis(
+                Axis::default()
+                    .title("Price (cents/kWh)")
+                    .style(Style::default().fg(Color::Gray))
+                    .bounds(y_bounds)
+                    .labels(
+                        y_bounds
+                            .iter()
+                            .map(|&p| Span::from(format!("{:.1}", p)))
+                            .collect::<Vec<Span>>(),
+                    ),
+            );
+
+        f.render_widget(chart, chunks[0]);
+    }
+
+    // Percentile Info
+    let percentile_block = Block::default().title("Current Thresholds").borders(Borders::ALL);
+    let mut percentile_text = vec![];
+    if let Some(state) = app_state {
+         percentile_text.push(Line::from(vec![Span::raw("Current Price: "), Span::styled(format!("{:.2}c", state.current_price), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))]));
+         percentile_text.push(Line::from(vec![Span::raw("Low Price < "), Span::styled(format!("{:.2}c", state.low_price_threshold), Style::default().fg(Color::Green))]));
+         percentile_text.push(Line::from(vec![Span::raw("Block Price > "), Span::styled(format!("{:.2}c", state.block_threshold), Style::default().fg(Color::Rgb(255, 165, 0)))]));
+         percentile_text.push(Line::from(vec![Span::raw("Spike Price > "), Span::styled(format!("{:.2}c", state.spike_threshold), Style::default().fg(Color::Red))]));
+    }
+    let percentile_paragraph = Paragraph::new(percentile_text).block(percentile_block);
+    f.render_widget(percentile_paragraph, top_chunks[0]);
+
+    // Decision Info
+    let decision_block = Block::default().title("Decisions & Status").borders(Borders::ALL);
+    let mut decision_text = vec![];
+     if let Some(state) = app_state {
+        let (comp_text, comp_style) = match state.compressor_decision {
+            CompressorState::Allowed => ("Allowed", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            CompressorState::Blocked => ("BLOCKED", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        };
+        decision_text.push(Line::from(vec![Span::raw("Compressor: "), Span::styled(comp_text, comp_style)]));
+        decision_text.push(Line::from(vec![Span::raw("Battery Min SOC: "), Span::styled(format!("{}%", state.soc_decision), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]));
+        decision_text.push(Line::from(vec![Span::raw(" ")])); // Spacer
+        decision_text.push(Line::from(vec![Span::raw("Status: "), Span::styled(&state.status_message, Style::default().fg(Color::Yellow))]));
+
+    }
+    let decision_paragraph = Paragraph::new(decision_text).block(decision_block);
+    f.render_widget(decision_paragraph, top_chunks[1]);
+}
+
+fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    let now = Utc::now();
+    let today = now.with_timezone(&Tz::CET).date_naive();
+    
+    let prices_today: Vec<_> = state.prices.iter().filter(|p| p.from.with_timezone(&Tz::CET).date_naive() == today).collect();
+
+    if prices_today.is_empty() { return ([0.0, 0.0], [0.0, 0.0], vec![], vec![]); }
+
+    let price_data: Vec<(f64, f64)> = prices_today.iter().map(|p| (p.from.timestamp() as f64, p.price)).collect();
+    
+    let min_price = prices_today.iter().map(|p| p.price).fold(f64::INFINITY, f64::min);
+    let max_price = prices_today.iter().map(|p| p.price).fold(f64::NEG_INFINITY, f64::max);
+    let y_bounds = [min_price * 0.95, max_price * 1.05];
+
+    let x_min = prices_today.first().unwrap().from.timestamp() as f64;
+    let x_max = prices_today.last().unwrap().from.timestamp() as f64;
+    let x_bounds = [x_min, x_max];
+
+    let now_ts = now.timestamp() as f64;
+    let line_data = vec![(now_ts, y_bounds[0]), (now_ts, y_bounds[1])];
+
+    (x_bounds, y_bounds, price_data, line_data)
+}
+
+
+// --- Logic (largely unchanged, but split from main loop) ---
+
+struct PriceThresholds { current_price: f64, block_threshold: f64, low_price_threshold: f64, spike_threshold: f64, }
+
 fn run_price_analysis(
-    config: &Config,
-    prices: &mut VecDeque<PriceInfo>,
-    client: &Client,
-    now: DateTime<Utc>,
-) -> Result<(CompressorState, u8)> {
+    config: &Config, prices: &mut VecDeque<PriceInfo>, client: &Client, now: DateTime<Utc>
+) -> Result<(CompressorState, u8, PriceThresholds)> {
     update_price_data(prices, now, client).context("Failed to update price data")?;
 
-    let current_price_info = prices
-        .iter()
-        .find(|p| now >= p.from && now < p.from + Duration::minutes(15))
-        .context("Could not find current price information")?;
-
-    log::info!("Current price: {:.2} cents/kWh.", current_price_info.price);
-
-    let mut todays_prices_values: Vec<f64> = prices
-        .iter()
-        .filter(|p| p.from.date_naive() == now.date_naive())
-        .map(|p| p.price)
-        .collect();
-
-    if todays_prices_values.len() < 4 {
-        return Err(anyhow::anyhow!("Not enough price data for today to make a relative decision."));
-    }
+    let current_price_info = prices.iter().find(|p| now >= p.from && now < p.from + Duration::minutes(15)).context("Could not find current price information")?;
+    let mut todays_prices_values: Vec<f64> = prices.iter().filter(|p| p.from.date_naive() == now.date_naive()).map(|p| p.price).collect();
+    if todays_prices_values.len() < 4 { return Err(anyhow::anyhow!("Not enough price data for today")); }
 
     let block_threshold = percentile(&mut todays_prices_values, config.block_price_percentile / 100.0);
     let low_price_threshold = percentile(&mut todays_prices_values, config.low_price_percentile / 100.0);
     let spike_threshold = percentile(&mut todays_prices_values, config.high_spike_percentile / 100.0);
     
-    log::info!(
-        "Today's relative price thresholds: Low < {:.2}, Block > {:.2}, Spike > {:.2}",
-        low_price_threshold, block_threshold, spike_threshold
-    );
+    let thresholds = PriceThresholds { current_price: current_price_info.price, block_threshold, low_price_threshold, spike_threshold, };
 
-    let price_based_decision = if current_price_info.price > block_threshold {
-        log::info!("Heatpump decision: BLOCK. Current price {:.2} > threshold {:.2}.", current_price_info.price, block_threshold);
-        CompressorState::Blocked
-    } else {
-        log::info!("Heatpump decision: ALLOW. Current price {:.2} <= threshold {:.2}.", current_price_info.price, block_threshold);
-        CompressorState::Allowed
-    };
+    let price_based_decision = if current_price_info.price > block_threshold { CompressorState::Blocked } else { CompressorState::Allowed };
 
     let baseline_soc = get_baseline_soc(config, now);
     let mut soc_decision = baseline_soc;
 
     if config.enable_battery_control {
-        // Find the highest price in the lookahead window to check for a spike.
         let lookahead_end_time = now + Duration::hours(config.lookahead_hours);
-        let max_future_price_info = prices
-            .iter()
-            .filter(|p| p.from >= now && p.from < lookahead_end_time)
-            .max_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
-
+        let max_future_price_info = prices.iter().filter(|p| p.from >= now && p.from < lookahead_end_time).max_by(|a, b| a.price.partial_cmp(&b.price).unwrap());
         let mut upcoming_spike_triggers_charge = false;
         if let Some(max_price) = max_future_price_info {
             let price_diff = max_price.price - current_price_info.price;
-            // A spike triggers a charge if it's above the percentile AND the difference is large enough.
-            if max_price.price > spike_threshold {
-                log::info!(
-                    "Detected upcoming spike of {:.2} at {}.",
-                    max_price.price,
-                    max_price.from.to_rfc3339()
-                );
-                if price_diff > config.min_spike_difference_cents {
-                    log::warn!(
-                        "Battery Decision: Force charge due to upcoming spike of {:.2} detected (diff: {:.2} > {:.2}).",
-                        max_price.price, price_diff, config.min_spike_difference_cents
-                    );
-                    upcoming_spike_triggers_charge = true;
-                }
-            }
+            if max_price.price > spike_threshold && price_diff > config.min_spike_difference_cents { upcoming_spike_triggers_charge = true; }
         }
+        if current_price_info.price < low_price_threshold { soc_decision = config.force_charge_soc; } 
+        else if upcoming_spike_triggers_charge { soc_decision = config.force_charge_soc; }
+    }
+    Ok((price_based_decision, soc_decision, thresholds))
+}
 
-        if current_price_info.price < low_price_threshold {
-            log::warn!("Battery Decision: Force charge. Price {:.2} is below the {:.0}th percentile threshold of {:.2}.", current_price_info.price, config.low_price_percentile, low_price_threshold);
-            soc_decision = config.force_charge_soc;
-        } else if upcoming_spike_triggers_charge {
-            // Already logged the reason above.
-            soc_decision = config.force_charge_soc;
-        } else {
-            log::info!("Battery Decision: Use baseline SOC of {}%.", baseline_soc);
+impl AppState {
+    fn new_with_status(status: String) -> Self {
+        AppState {
+            prices: vec![],
+            current_price: 0.0, block_threshold: 0.0, low_price_threshold: 0.0, spike_threshold: 0.0,
+            compressor_decision: CompressorState::Allowed, soc_decision: 0,
+            status_message: status,
         }
     }
-
-    Ok((price_based_decision, soc_decision))
 }
 
 /// Determines the baseline Minimum SOC based on the season.
@@ -280,7 +417,7 @@ fn get_baseline_soc(config: &Config, now: DateTime<Utc>) -> u8 {
 
 /// Connects to the Victron system via SSH and sets the Minimum SOC.
 fn set_minimum_soc(config: &Config, soc: u8) -> Result<()> {
-    log::debug!(
+    log::info!(
         "Set Minimum SOC to {}% on host {}",
         soc,
         config.ssh_host
@@ -427,14 +564,6 @@ fn load_config() -> Result<Config> {
         summer_min_soc: env::var("SUMMER_MIN_SOC").unwrap_or("10".into()).parse()?,
         winter_min_soc: env::var("WINTER_MIN_SOC").unwrap_or("20".into()).parse()?,
     })
-}
-
-/// Provides a summary of the loaded configuration for logging.
-fn config_summary(config: &Config) -> String {
-    format!(
-        "Block Percentile: {:.1}%, Max Block: {}m, Min Rest: {}m, Battery Control: {}",
-        config.block_price_percentile, config.max_continuous_block_minutes, config.min_rest_time_minutes, config.enable_battery_control
-    )
 }
 
 /// Calculates the percentile value from a slice of f64 values.
