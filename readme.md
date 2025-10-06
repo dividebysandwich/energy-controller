@@ -7,11 +7,20 @@ It can also interface with a Victron battery system to optimize battery usage ba
 
 ## Features
 - Fetches electricity prices from Spotty in JSON format.
-- Controls a Shelly Plus 1 relay to block or allow heat pump operation based on electricity prices.
+- Prevents expensive operations of heat pumps during price spikes, using a Shelly Plus 1 relay wired to block the compressor startup
 - Optional integration with a Victron battery system to manage battery state of charge (SOC) based on electricity prices.
+- Intelligently detects price dips and starts force-charging the battery only at the beginning of a significant dip
+- Different minimum battery SOC based on season
 - Configurable parameters for lookahead window, blocking slots, and battery SOC thresholds.
+- Percentile-based operation works regardless of current average price levels
+- TUI based display of price graph and current state
 
 Note: This program does not manage heating and temperature. It simply suppresses heatpump operation during price spikes. This supression is configurable and there is a maximum delay so as to not let temperatures drop too much.
+
+## Improvement ideas
+
+The decision code currently does not consider the current charge state of the battery, nor does it know how big the battery capacity actually is or anything about possible simultaneous PV charging of the battery. It simply looks at the price development and decides to gather some reserves ahead of price spikes, as well as preventing the heatpump from operating during very expensive times, within comfort reasons. 
+However, note that especially in summer, the EPEX pricing usually correlates with wind and solar energy production in Europe (prices go down to 0 or even negative when there's lots of wind and sun) so depending on your system and location this may work fine as-is.
 
 ## Configuration
 
