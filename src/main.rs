@@ -71,7 +71,8 @@ struct Config {
     ssh_host: String,
     ssh_user: String,
     ssh_pass: String,
-    force_charge_soc: u8,
+    winter_force_charge_soc: u8,
+    summer_force_charge_soc: u8,
     summer_min_soc: u8,
     winter_min_soc: u8,
 }
@@ -542,6 +543,7 @@ fn run_price_analysis(
     };
 
     let baseline_soc = get_baseline_soc(config, now);
+    let force_charge_soc = get_force_charge_soc(config, now);
     let mut battery_decision = BatteryDecision::Baseline(baseline_soc);
 
     if config.enable_battery_control {
@@ -572,7 +574,7 @@ fn run_price_analysis(
                     let dip_entry_threshold = percentile(&mut dip_prices, 0.25); // Charge when price is in the bottom 25% of the dip
                     if current_price_info.price <= dip_entry_threshold {
                         battery_decision = BatteryDecision::ForceCharge(
-                            config.force_charge_soc,
+                            force_charge_soc,
                             "Pre-Spike Dip".to_string(),
                         );
                     } else {
@@ -582,7 +584,7 @@ fn run_price_analysis(
                 } else {
                     // Spike is the very next slot
                     battery_decision = BatteryDecision::ForceCharge(
-                        config.force_charge_soc,
+                        force_charge_soc,
                         "Immediate Spike".to_string(),
                     );
                 }
@@ -601,7 +603,7 @@ fn run_price_analysis(
                 if current_price_info.price <= min_future_price + 0.01 {
                     // Tolerance for float issues
                     battery_decision = BatteryDecision::ForceCharge(
-                        config.force_charge_soc,
+                        force_charge_soc,
                         "Low Point".to_string(),
                     );
                 } else {
@@ -610,7 +612,7 @@ fn run_price_analysis(
             } else {
                 // No future prices available in window
                 battery_decision =
-                    BatteryDecision::ForceCharge(config.force_charge_soc, "EOD Low".to_string());
+                    BatteryDecision::ForceCharge(force_charge_soc, "EOD Low".to_string());
             }
         }
     }
@@ -635,6 +637,13 @@ fn get_baseline_soc(config: &Config, now: DateTime<Utc>) -> u8 {
         _ => config.winter_min_soc,    // October to March is Winter
     }
 }
+fn get_force_charge_soc(config: &Config, now: DateTime<Utc>) -> u8 {
+    match now.month() {
+        4..=9 => config.summer_force_charge_soc, // April to September is Summer
+        _ => config.winter_force_charge_soc,    // October to March is Winter
+    }
+}
+
 
 /// Connects to the Victron system via SSH and sets the Minimum SOC.
 fn set_minimum_soc(config: &Config, soc: u8) -> Result<()> {
@@ -781,7 +790,8 @@ fn load_config() -> Result<Config> {
         ssh_host: env::var("SSH_HOST").context("SSH_HOST not set")?,
         ssh_user: env::var("SSH_USER").context("SSH_USER not set")?,
         ssh_pass: env::var("SSH_PASS").context("SSH_PASS not set")?,
-        force_charge_soc: env::var("FORCE_CHARGE_SOC").unwrap_or("80".into()).parse()?,
+        winter_force_charge_soc: env::var("WINTER_FORCE_CHARGE_SOC").unwrap_or("60".into()).parse()?,
+        summer_force_charge_soc: env::var("SUMMER_FORCE_CHARGE_SOC").unwrap_or("30".into()).parse()?,
         summer_min_soc: env::var("SUMMER_MIN_SOC").unwrap_or("10".into()).parse()?,
         winter_min_soc: env::var("WINTER_MIN_SOC").unwrap_or("20".into()).parse()?,
     })
