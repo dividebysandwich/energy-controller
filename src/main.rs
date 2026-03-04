@@ -146,13 +146,17 @@ fn main() -> Result<()> {
                     };
 
                     let optimized_soc = match battery_decision {
-                        BatteryDecision::ForceCharge(target, _) | BatteryDecision::WaitForLower(target, _) => {
-                            // If currently higher than target, hold current
+                        BatteryDecision::ForceCharge(target, _) => {
+                            // We are actively force-charging. Lock in current charge so we don't discharge.
                             cmp::max(target, current_status.soc)
                         },
-                        BatteryDecision::Baseline(target) => target,
+                        BatteryDecision::WaitForLower(target, _) | BatteryDecision::Baseline(target) => {
+                            // We are waiting for a dip OR running normally. 
+                            // Allow the battery to discharge to cover house load!
+                            target
+                        },
                     };
-                    
+
                     let battery_status_str = if optimized_soc != desired_soc {
                          format!("{} [Holding @ {}%]", battery_reason, current_status.soc)
                     } else {
