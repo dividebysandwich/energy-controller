@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{Datelike, DateTime, Duration, NaiveDate, Utc};
+use chrono::{NaiveDateTime, Datelike, DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -61,6 +61,28 @@ enum BatteryDecision {
     WaitForLower(u8, f64),   // Baseline SOC for now, future lower price
 }
 
+#[derive(Deserialize, Debug, Clone, Default)]
+struct DailyForecast {
+    sunshine_duration: Vec<f64>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+struct HourlyForecast {
+    time: Vec<String>,
+    sunshine_duration: Vec<f64>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+struct WeatherResponse {
+    daily: DailyForecast,
+    hourly: HourlyForecast,
+}
+
+struct WeatherCache {
+    forecast: WeatherResponse,
+    last_fetched: DateTime<Utc>,
+}
+
 /// Holds all configuration loaded from environment variables.
 struct Config {
     // General
@@ -87,6 +109,10 @@ struct Config {
     summer_force_charge_soc: u8,
     summer_min_soc: u8,
     winter_min_soc: u8,
+    lat: f64,
+    lon: f64,
+    battery_size_kwh: f64,
+    pv_size_kwp: f64,
 }
 
 /// Holds all the data needed for the UI to render a frame.
@@ -101,6 +127,8 @@ struct AppState {
     soc_decision: u8,
     system_status: SystemStatus,
     status_message: String,
+    expected_pv_kwh: f64,
+    hourly_sunshine: Vec<(f64, f64)>,
 }
 
 
@@ -116,6 +144,7 @@ fn main() -> Result<()> {
         let mut last_soc_set: u8 = 0;
         let mut block_start_time: Option<DateTime<Utc>> = None;
         let mut rest_until_time: Option<DateTime<Utc>> = None;
+        let mut weather_cache: Option<WeatherCache> = None;
 
         if let Err(e) = control_relay(&config, CompressorState::Allowed, &client) {
             let _ = tx.send(AppState::new_with_status(format!("Startup relay error: {}", e)));
@@ -123,7 +152,22 @@ fn main() -> Result<()> {
 
         loop {
             let now = Utc::now();
-            
+
+            // Fetch weather twice a day (every 12 hours) or if missing
+            let needs_weather_update = weather_cache.as_ref().map_or(true, |cache| {
+                now.signed_duration_since(cache.last_fetched).num_hours() >= 12
+            });
+
+            if needs_weather_update {
+                match fetch_weather(&config, &client) {
+                    Ok(data) => weather_cache = Some(WeatherCache { forecast: data, last_fetched: now }),
+                    Err(e) => log::error!("Failed to fetch weather: {}", e),
+                }
+            }
+
+            // Fallback empty weather if API fails on startup
+            let current_weather = weather_cache.as_ref().map(|c| c.forecast.clone()).unwrap_or_default();
+
             // Fetch current system status (SOC, PV, etc.)
             let current_status = fetch_system_status(&client, &config.status_url)
                 .unwrap_or_else(|e| {
@@ -132,10 +176,10 @@ fn main() -> Result<()> {
                 });
 
             // Run Analysis
-            let result = run_price_analysis(&config, &mut prices, &client, now);
+            let result = run_price_analysis(&config, &mut prices, &client, now, &current_weather, &current_status);
 
             match result {
-                Ok((price_based_decision, battery_decision, thresholds)) => {
+                Ok((price_based_decision, battery_decision, thresholds, expected_pv_kwh)) => {
                     let mut final_compressor_decision = price_based_decision;
 
                     // Unpack battery decision
@@ -230,6 +274,20 @@ fn main() -> Result<()> {
                         last_soc_set = optimized_soc;
                     }
 
+                    // Parse hourly sunshine for the chart
+                    let mut hourly_sunshine = vec![];
+                    if let Some(cache) = &weather_cache {
+                        for (i, t_str) in cache.forecast.hourly.time.iter().enumerate() {
+                            if let Ok(ndt) = NaiveDateTime::parse_from_str(t_str, "%Y-%m-%dT%H:%M") {
+                                // Convert Open-Meteo local time string to a chart-compatible timestamp
+                                if let Some(ts) = ndt.and_local_timezone(Tz::CET).single() {
+                                    let dur = cache.forecast.hourly.sunshine_duration.get(i).copied().unwrap_or(0.0);
+                                    hourly_sunshine.push((ts.timestamp() as f64, dur));
+                                }
+                            }
+                        }
+                    }
+
                     // Send complete state to UI thread
                     let app_state = AppState {
                         prices: prices.iter().cloned().collect(),
@@ -239,6 +297,8 @@ fn main() -> Result<()> {
                         spike_threshold: thresholds.spike_threshold,
                         compressor_decision: final_compressor_decision,
                         soc_decision: optimized_soc,
+                        expected_pv_kwh: expected_pv_kwh,
+                        hourly_sunshine: hourly_sunshine.clone(),
                         system_status: current_status,
                         status_message,
                     };
@@ -298,7 +358,11 @@ fn main() -> Result<()> {
 fn ui(f: &mut Frame, app_state: Option<&AppState>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+        // Chart takes all available space, bottom boxes take exactly 8 lines
+        .constraints([
+            Constraint::Min(0),    // Expands to fill remaining vertical space
+            Constraint::Length(8)
+        ].as_ref())
         .split(f.area());
     
     let bottom_chunks = Layout::default()
@@ -311,14 +375,8 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
         .split(chunks[1]);
 
     if let Some(state) = app_state {
-        let (x_bounds, y_bounds, price_data, v_line_data, h_line_data) = prepare_chart_data(state);
+        let (x_bounds, y_bounds, price_data, v_line_data, h_line_data, sun_data) = prepare_chart_data(state);
         let datasets = vec![
-            Dataset::default()
-                .name("Price")
-                .marker(symbols::Marker::Dot)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Cyan))
-                .data(&price_data),
             Dataset::default()
                 .name("Current")
                 .marker(symbols::Marker::Braille)
@@ -329,8 +387,20 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
                 .name("Now")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Yellow))
+                .style(Style::default().fg(Color::Red))
                 .data(&v_line_data),
+            Dataset::default()
+                .name("Sun Forecast")
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM))
+                .data(&sun_data),
+            Dataset::default()
+                .name("Price")
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::Cyan))
+                .data(&price_data),
         ];
 
         let now_str = Utc::now().with_timezone(&Tz::CET).format("%H:%M:%S").to_string();
@@ -391,6 +461,10 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
             Span::styled(format!("{:.1} kW", state.system_status.pv_power), Style::default().fg(Color::Yellow))
         ]));
         status_text.push(Line::from(vec![
+            Span::raw("Exp PV: "), 
+            Span::styled(format!("{:.1} kWh", state.expected_pv_kwh), Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM)),
+        ]));
+        status_text.push(Line::from(vec![
             Span::raw("Load: "), 
             Span::styled(format!("{:.1} kW", state.system_status.load_power), Style::default().fg(Color::Blue))
         ]));
@@ -429,7 +503,7 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
     f.render_widget(Paragraph::new(decision_text).block(decision_block), bottom_chunks[2]);
 }
 
-fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>) {
+fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>) {
     let now = Utc::now();
     let today = now.with_timezone(&Tz::CET).date_naive();
     let tomorrow = today.succ_opt().unwrap_or(today);
@@ -439,7 +513,7 @@ fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>,
         p_date == today || p_date == tomorrow
     }).collect();
 
-    if relevant_prices.is_empty() { return ([0.0, 1.0], [0.0, 1.0], vec![], vec![], vec![]); }
+    if relevant_prices.is_empty() { return ([0.0, 1.0], [0.0, 1.0], vec![], vec![], vec![], vec![]); }
 
     let price_data: Vec<(f64, f64)> = relevant_prices.iter().map(|p| (p.from.timestamp() as f64, p.price)).collect();
     let min_price = relevant_prices.iter().map(|p| p.price).fold(f64::INFINITY, f64::min);
@@ -452,7 +526,19 @@ fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>,
     let v_line_data = vec![(now_ts, y_bounds[0]), (now_ts, y_bounds[1])];
     let h_line_data = vec![(x_bounds[0], state.current_price), (x_bounds[1], state.current_price)];
 
-    (x_bounds, y_bounds, price_data, v_line_data, h_line_data)
+    let y_range = y_bounds[1] - y_bounds[0];
+    
+    // Create the sunshine dataset, pinned to the bottom of the chart
+    let sun_data: Vec<(f64, f64)> = state.hourly_sunshine.iter()
+        .filter(|(ts, _)| *ts >= x_bounds[0] && *ts <= x_bounds[1])
+        .map(|(ts, dur)| {
+            // 3600 seconds = 1 full hour of sun. Scale this to max 15% of the chart height.
+            let sun_height = (dur / 3600.0) * (y_range * 0.15);
+            (*ts, y_bounds[0] + sun_height)
+        })
+        .collect();
+
+    (x_bounds, y_bounds, price_data, v_line_data, h_line_data, sun_data)
 }
 
 struct PriceThresholds {
@@ -467,34 +553,73 @@ fn run_price_analysis(
     prices: &mut VecDeque<PriceInfo>,
     client: &Client,
     now: DateTime<Utc>,
-) -> Result<(CompressorState, BatteryDecision, PriceThresholds)> {
+    weather: &WeatherResponse,
+    current_status: &SystemStatus,
+) -> Result<(CompressorState, BatteryDecision, PriceThresholds, f64)> {
+    
+    // Update our local price cache
     update_price_data(prices, now, client).context("Failed to update price data")?;
 
-    let current_price_info = prices.iter().find(|p| now >= p.from && now < p.from + Duration::minutes(15))
+    let current_price_info = prices
+        .iter()
+        .find(|p| now >= p.from && now < p.from + Duration::minutes(15))
         .context("Could not find current price information")?;
-    let mut todays_prices_values: Vec<f64> = prices.iter().filter(|p| p.from.date_naive() == now.date_naive())
-        .map(|p| p.price).collect();
-    if todays_prices_values.len() < 4 { return Err(anyhow::anyhow!("Not enough price data")); }
 
-    let block_threshold = percentile(&mut todays_prices_values, config.block_price_percentile / 100.0);
-    let low_price_threshold = percentile(&mut todays_prices_values, config.low_price_percentile / 100.0);
-    let spike_threshold = percentile(&mut todays_prices_values, config.high_spike_percentile / 100.0);
+    // Sliding Window Threshold Calculation
+    // Ensure we look ahead at least 24 hours, or the lookahead window, whichever is larger.
+    let analysis_window_hours = cmp::max(24, config.lookahead_hours);
+    let window_end = now + Duration::hours(analysis_window_hours);
 
-    let thresholds = PriceThresholds { current_price: current_price_info.price, block_threshold, low_price_threshold, spike_threshold };
-    let price_based_decision = if current_price_info.price > block_threshold { CompressorState::Blocked } else { CompressorState::Allowed };
+    let mut window_prices_values: Vec<f64> = prices
+        .iter()
+        .filter(|p| p.from >= now && p.from < window_end)
+        .map(|p| p.price)
+        .collect();
 
+    if window_prices_values.len() < 4 {
+        return Err(anyhow::anyhow!("Not enough price data for sliding window"));
+    }
+
+    let block_threshold = percentile(&mut window_prices_values, config.block_price_percentile / 100.0);
+    let low_price_threshold = percentile(&mut window_prices_values, config.low_price_percentile / 100.0);
+    let spike_threshold = percentile(&mut window_prices_values, config.high_spike_percentile / 100.0);
+
+    let thresholds = PriceThresholds {
+        current_price: current_price_info.price,
+        block_threshold,
+        low_price_threshold,
+        spike_threshold,
+    };
+    
+    // Heatpump / Relay Decision
+    let price_based_decision = if current_price_info.price > block_threshold {
+        CompressorState::Blocked
+    } else {
+        CompressorState::Allowed
+    };
+
+    // Initial Battery Decision Logic
     let baseline_soc = get_baseline_soc(config, now);
     let force_charge_soc = get_force_charge_soc(config, now);
     let mut battery_decision = BatteryDecision::Baseline(baseline_soc);
 
     if config.enable_battery_control {
         let lookahead_end_time = now + Duration::hours(config.lookahead_hours);
-        let future_prices: Vec<&PriceInfo> = prices.iter().filter(|p| p.from >= now && p.from < lookahead_end_time).collect();
+        let future_prices: Vec<&PriceInfo> = prices
+            .iter()
+            .filter(|p| p.from >= now && p.from < lookahead_end_time)
+            .collect();
 
+        // Check for incoming spikes
         if let Some(max_price_info) = future_prices.iter().max_by(|a, b| a.price.partial_cmp(&b.price).unwrap()) {
             if max_price_info.price > spike_threshold && (max_price_info.price - current_price_info.price) > config.min_spike_difference_cents {
                 let charge_window_end = max_price_info.from;
-                let mut dip_prices: Vec<f64> = prices.iter().filter(|p| p.from >= now && p.from < charge_window_end).map(|p| p.price).collect();
+                let mut dip_prices: Vec<f64> = prices
+                    .iter()
+                    .filter(|p| p.from >= now && p.from < charge_window_end)
+                    .map(|p| p.price)
+                    .collect();
+                
                 if !dip_prices.is_empty() {
                     let dip_entry_threshold = percentile(&mut dip_prices, 0.25);
                     if current_price_info.price <= dip_entry_threshold {
@@ -504,14 +629,12 @@ fn run_price_analysis(
                     }
                 } else {
                     // Spike is the very next slot
-                    battery_decision = BatteryDecision::ForceCharge(
-force_charge_soc,
-"Immediate Spike".to_string(),
-);
+                    battery_decision = BatteryDecision::ForceCharge(force_charge_soc, "Immediate Spike".to_string());
                 }
             }
         }
 
+        // If no spike is detected, check if we are in a general low-price dip
         if matches!(battery_decision, BatteryDecision::Baseline(_)) && current_price_info.price < low_price_threshold {
             if let Some(min_future_price) = future_prices.iter().map(|p| p.price).min_by(|a, b| a.partial_cmp(b).unwrap()) {
                 if current_price_info.price <= min_future_price + 0.01 {
@@ -520,13 +643,49 @@ force_charge_soc,
                     battery_decision = BatteryDecision::WaitForLower(baseline_soc, min_future_price);
                 }
             } else {
-                // No future prices available in window
-                battery_decision =
-                    BatteryDecision::ForceCharge(force_charge_soc, "EOD Low".to_string());
+                // No future prices available in window, force charge as an End-Of-Day low
+                battery_decision = BatteryDecision::ForceCharge(force_charge_soc, "EOD Low".to_string());
             }
         }
+
+        // PV Forecast Overrides
+        let is_winter = matches!(now.month(), 10..=12 | 1..=3);
+        
+        // Calculate how much energy the battery actually needs to reach 100%
+        let missing_soc_percent = 100.0 - (current_status.soc as f64);
+        let missing_kwh = config.battery_size_kwh * (missing_soc_percent / 100.0);
+        
+        // Calculate expected PV yield for today based on Open-Meteo sunshine duration
+        let sunshine_seconds = weather.daily.sunshine_duration.first().copied().unwrap_or(0.0);
+        let seasonal_efficiency = if is_winter { 0.5 } else { 0.75 }; 
+        let expected_pv_kwh = config.pv_size_kwp * (sunshine_seconds / 3600.0) * seasonal_efficiency;
+
+        if !is_winter {
+            // In Summer/Spring/Autumn, favor PV.
+            if expected_pv_kwh >= missing_kwh {
+                // The sun will fill the battery. Cancel grid ForceCharge unless prices are basically zero.
+                if let BatteryDecision::ForceCharge(_, reason) = &battery_decision {
+                    let reason_clone = reason.clone();
+                    if current_price_info.price > 1.0 { 
+                        battery_decision = BatteryDecision::Baseline(baseline_soc);
+                        log::info!("Canceled ForceCharge ({}). PV yield expected: {:.2}kWh, missing: {:.2}kWh", 
+                            reason_clone, expected_pv_kwh, missing_kwh);
+                    }
+                }
+            }
+        } else {
+            // In Winter, favor the grid. 
+            // If expected PV is terrible and price is somewhat low, aggressively force charge.
+            if expected_pv_kwh < (missing_kwh * 0.3) && current_price_info.price < low_price_threshold {
+                battery_decision = BatteryDecision::ForceCharge(force_charge_soc, "Winter Low PV Grid Charge".to_string());
+            }
+        }
+
+        return Ok((price_based_decision, battery_decision, thresholds, expected_pv_kwh));
     }
-    Ok((price_based_decision, battery_decision, thresholds))
+    
+    // Fallback if battery control is disabled
+    Ok((price_based_decision, battery_decision, thresholds, 0.0))
 }
 
 impl AppState {
@@ -537,6 +696,8 @@ impl AppState {
             compressor_decision: CompressorState::Allowed, soc_decision: 0,
             system_status: SystemStatus::default(),
             status_message: status,
+            expected_pv_kwh: 0.0,
+            hourly_sunshine: vec![],
         }
     }
 }
@@ -717,6 +878,23 @@ fn control_relay(
     Ok(())
 }
 
+fn fetch_weather(config: &Config, client: &Client) -> Result<WeatherResponse> {
+    // Fetches today and tomorrow automatically based on timezone
+    let url = format!(
+        "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&daily=sunshine_duration&hourly=sunshine_duration&forecast_days=2&timezone=auto",
+        config.lat, config.lon
+    );
+    
+    log::debug!("Fetching weather data from Open-Meteo...");
+    let response = client.get(&url).send()?;
+    
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!("Open-Meteo API failed: {}", response.status()));
+    }
+    
+    Ok(response.json()?)
+}
+
 /// Loads configuration from environment variables.
 fn load_config() -> Result<Config> {
     Ok(Config {
@@ -739,6 +917,10 @@ fn load_config() -> Result<Config> {
         summer_force_charge_soc: env::var("SUMMER_FORCE_CHARGE_SOC").unwrap_or("30".into()).parse()?,
         summer_min_soc: env::var("SUMMER_MIN_SOC").unwrap_or("10".into()).parse()?,
         winter_min_soc: env::var("WINTER_MIN_SOC").unwrap_or("20".into()).parse()?,
+        lat: env::var("LATITUDE").unwrap_or("48.2082".into()).parse()?,
+        lon: env::var("LONGITUDE").unwrap_or("16.3738".into()).parse()?,
+        battery_size_kwh: env::var("BATTERY_SIZE_KWH").unwrap_or("10.0".into()).parse()?,
+        pv_size_kwp: env::var("PV_SIZE_KWP").unwrap_or("5.0".into()).parse()?,
     })
 }
 
