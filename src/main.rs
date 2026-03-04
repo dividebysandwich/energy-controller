@@ -70,6 +70,7 @@ struct DailyForecast {
 struct HourlyForecast {
     time: Vec<String>,
     sunshine_duration: Vec<f64>,
+    temperature_2m: Vec<f64>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -113,6 +114,9 @@ struct Config {
     lon: f64,
     battery_size_kwh: f64,
     pv_size_kwp: f64,
+    base_load_kw: f64,
+    heating_off_temp_c: f64,
+    heating_kwh_per_h_at_0c: f64,
 }
 
 /// Holds all the data needed for the UI to render a frame.
@@ -129,6 +133,7 @@ struct AppState {
     status_message: String,
     expected_pv_kwh: f64,
     hourly_sunshine: Vec<(f64, f64)>,
+    hourly_heating_kw: Vec<(f64, f64)>,
 }
 
 
@@ -191,14 +196,11 @@ fn main() -> Result<()> {
 
                     let optimized_soc = match battery_decision {
                         BatteryDecision::ForceCharge(target, _) => {
-                            // We are actively force-charging. Lock in current charge so we don't discharge.
-                            cmp::max(target, current_status.soc)
-                        },
-                        BatteryDecision::WaitForLower(target, _) | BatteryDecision::Baseline(target) => {
-                            // We are waiting for a dip OR running normally. 
-                            // Allow the battery to discharge to cover house load!
+                            // Use calculated target. If target is 45% and battery is 97%,
+                            // Victron will use the battery for the house until it hits 45% SOC
                             target
                         },
+                        BatteryDecision::WaitForLower(target, _) | BatteryDecision::Baseline(target) => target,
                     };
 
                     let battery_status_str = if optimized_soc != desired_soc {
@@ -274,15 +276,26 @@ fn main() -> Result<()> {
                         last_soc_set = optimized_soc;
                     }
 
-                    // Parse hourly sunshine for the chart
+                    // Parse hourly sunshine and heating for the chart
                     let mut hourly_sunshine = vec![];
+                    let mut hourly_heating_kw = vec![];
+
                     if let Some(cache) = &weather_cache {
                         for (i, t_str) in cache.forecast.hourly.time.iter().enumerate() {
                             if let Ok(ndt) = NaiveDateTime::parse_from_str(t_str, "%Y-%m-%dT%H:%M") {
-                                // Convert Open-Meteo local time string to a chart-compatible timestamp
                                 if let Some(ts) = ndt.and_local_timezone(Tz::CET).single() {
+                                    // Parse Sun
                                     let dur = cache.forecast.hourly.sunshine_duration.get(i).copied().unwrap_or(0.0);
                                     hourly_sunshine.push((ts.timestamp() as f64, dur));
+
+                                    // NEW: Parse Temp and Calculate Heating kW
+                                    let temp = cache.forecast.hourly.temperature_2m.get(i).copied().unwrap_or(0.0);
+                                    let mut kw = 0.0;
+                                    if temp < config.heating_off_temp_c {
+                                        let temp_factor = (config.heating_off_temp_c - temp) / config.heating_off_temp_c;
+                                        kw = config.heating_kwh_per_h_at_0c * temp_factor;
+                                    }
+                                    hourly_heating_kw.push((ts.timestamp() as f64, kw));
                                 }
                             }
                         }
@@ -298,7 +311,8 @@ fn main() -> Result<()> {
                         compressor_decision: final_compressor_decision,
                         soc_decision: optimized_soc,
                         expected_pv_kwh: expected_pv_kwh,
-                        hourly_sunshine: hourly_sunshine.clone(),
+                        hourly_sunshine: hourly_sunshine,
+                        hourly_heating_kw: hourly_heating_kw,
                         system_status: current_status,
                         status_message,
                     };
@@ -375,7 +389,7 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
         .split(chunks[1]);
 
     if let Some(state) = app_state {
-        let (x_bounds, y_bounds, price_data, v_line_data, h_line_data, sun_data) = prepare_chart_data(state);
+        let (x_bounds, y_bounds, price_data, v_line_data, h_line_data, sun_data, heating_data) = prepare_chart_data(state);
         let datasets = vec![
             Dataset::default()
                 .name("Current")
@@ -387,13 +401,19 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
                 .name("Now")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Red))
+                .style(Style::default().fg(Color::Green))
                 .data(&v_line_data),
+            Dataset::default()
+                .name("Heat Load")
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::Red))
+                .data(&heating_data),
             Dataset::default()
                 .name("Sun Forecast")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM))
+                .style(Style::default().fg(Color::Yellow))
                 .data(&sun_data),
             Dataset::default()
                 .name("Price")
@@ -503,7 +523,7 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
     f.render_widget(Paragraph::new(decision_text).block(decision_block), bottom_chunks[2]);
 }
 
-fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>) {
+fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>) {
     let now = Utc::now();
     let today = now.with_timezone(&Tz::CET).date_naive();
     let tomorrow = today.succ_opt().unwrap_or(today);
@@ -513,7 +533,7 @@ fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>,
         p_date == today || p_date == tomorrow
     }).collect();
 
-    if relevant_prices.is_empty() { return ([0.0, 1.0], [0.0, 1.0], vec![], vec![], vec![], vec![]); }
+    if relevant_prices.is_empty() { return ([0.0, 1.0], [0.0, 1.0], vec![], vec![], vec![], vec![], vec![]); }
 
     let price_data: Vec<(f64, f64)> = relevant_prices.iter().map(|p| (p.from.timestamp() as f64, p.price)).collect();
     let min_price = relevant_prices.iter().map(|p| p.price).fold(f64::INFINITY, f64::min);
@@ -538,7 +558,18 @@ fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>,
         })
         .collect();
 
-    (x_bounds, y_bounds, price_data, v_line_data, h_line_data, sun_data)
+    // Expected heating graph
+    let heating_data: Vec<(f64, f64)> = state.hourly_heating_kw.iter()
+        .filter(|(ts, _)| *ts >= x_bounds[0] && *ts <= x_bounds[1])
+        .map(|(ts, kw)| {
+            // Scale so that 5.0 kW equals 30% of the chart's total height.
+            // TODO: Make configurable for user's particular heatpump power draw
+            let scaled_y = y_bounds[0] + (kw / 5.0) * (y_range * 0.30);
+            (*ts, scaled_y)
+        })
+        .collect();
+
+    (x_bounds, y_bounds, price_data, v_line_data, h_line_data, sun_data, heating_data)
 }
 
 struct PriceThresholds {
@@ -546,6 +577,46 @@ struct PriceThresholds {
     block_threshold: f64,
     low_price_threshold: f64,
     spike_threshold: f64,
+}
+
+fn calculate_required_soc(
+    config: &Config,
+    weather: &WeatherResponse,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+) -> u8 {
+    let mut total_kwh = 0.0;
+    let mut current = start_time;
+    
+    while current < end_time {
+        let mut temp_c = 0.0; // Failsafe to 0C if missing
+        
+        // Open-Meteo time format is "YYYY-MM-DDTHH:00"
+        let current_local = current.with_timezone(&Tz::CET).format("%Y-%m-%dT%H:00").to_string();
+        
+        if let Some(idx) = weather.hourly.time.iter().position(|t| t == &current_local) {
+            temp_c = weather.hourly.temperature_2m.get(idx).copied().unwrap_or(0.0);
+        }
+
+        // Add baseline house load
+        total_kwh += config.base_load_kw;
+
+        // Add dynamic heating load
+        if temp_c < config.heating_off_temp_c {
+            let temp_factor = (config.heating_off_temp_c - temp_c) / config.heating_off_temp_c;
+            total_kwh += config.heating_kwh_per_h_at_0c * temp_factor;
+        }
+        
+        current += Duration::hours(1);
+    }
+
+    // Convert required kWh into a percentage of your battery size
+    let required_soc_percent = (total_kwh / config.battery_size_kwh) * 100.0;
+    
+    // Add baseline SOC so we don't drain to absolute zero
+    let target = get_baseline_soc(config, start_time) as f64 + required_soc_percent;
+    
+    cmp::min(100, target.ceil() as u8)
 }
 
 fn run_price_analysis(
@@ -614,22 +685,25 @@ fn run_price_analysis(
         if let Some(max_price_info) = future_prices.iter().max_by(|a, b| a.price.partial_cmp(&b.price).unwrap()) {
             if max_price_info.price > spike_threshold && (max_price_info.price - current_price_info.price) > config.min_spike_difference_cents {
                 let charge_window_end = max_price_info.from;
+
+                // Calculate exactly how much SOC we need for the night + the morning spike (assumed 4 hours)
+                let dynamic_target = calculate_required_soc(config, weather, now, charge_window_end + Duration::hours(4));
+
                 let mut dip_prices: Vec<f64> = prices
                     .iter()
                     .filter(|p| p.from >= now && p.from < charge_window_end)
                     .map(|p| p.price)
                     .collect();
-                
+
                 if !dip_prices.is_empty() {
                     let dip_entry_threshold = percentile(&mut dip_prices, 0.25);
                     if current_price_info.price <= dip_entry_threshold {
-                        battery_decision = BatteryDecision::ForceCharge(force_charge_soc, "Pre-Spike Dip".to_string());
+                        battery_decision = BatteryDecision::ForceCharge(dynamic_target, format!("Pre-Spike (Need {}%)", dynamic_target));
                     } else {
                         battery_decision = BatteryDecision::WaitForLower(baseline_soc, dip_entry_threshold);
                     }
                 } else {
-                    // Spike is the very next slot
-                    battery_decision = BatteryDecision::ForceCharge(force_charge_soc, "Immediate Spike".to_string());
+                    battery_decision = BatteryDecision::ForceCharge(dynamic_target, format!("Immediate Spike (Need {}%)", dynamic_target));
                 }
             }
         }
@@ -698,6 +772,7 @@ impl AppState {
             status_message: status,
             expected_pv_kwh: 0.0,
             hourly_sunshine: vec![],
+            hourly_heating_kw: vec![],
         }
     }
 }
@@ -881,7 +956,7 @@ fn control_relay(
 fn fetch_weather(config: &Config, client: &Client) -> Result<WeatherResponse> {
     // Fetches today and tomorrow automatically based on timezone
     let url = format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&daily=sunshine_duration&hourly=sunshine_duration&forecast_days=2&timezone=auto",
+        "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&daily=sunshine_duration&hourly=sunshine_duration,temperature_2m&forecast_days=2&timezone=auto",
         config.lat, config.lon
     );
     
@@ -921,6 +996,9 @@ fn load_config() -> Result<Config> {
         lon: env::var("LONGITUDE").unwrap_or("16.3738".into()).parse()?,
         battery_size_kwh: env::var("BATTERY_SIZE_KWH").unwrap_or("10.0".into()).parse()?,
         pv_size_kwp: env::var("PV_SIZE_KWP").unwrap_or("5.0".into()).parse()?,
+        base_load_kw: env::var("BASE_LOAD_KW").unwrap_or("0.6".into()).parse()?, // 600W background load
+        heating_off_temp_c: env::var("HEATING_OFF_TEMP_C").unwrap_or("15.0".into()).parse()?, // Temp where heating stops
+        heating_kwh_per_h_at_0c: env::var("HEATING_KWH_PER_H_AT_0C").unwrap_or("1.5".into()).parse()?,
     })
 }
 
