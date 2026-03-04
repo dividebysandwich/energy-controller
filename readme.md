@@ -127,4 +127,52 @@ Create a `.env` file in the same directory as the executable with the following 
     WINTER_MIN_SOC=20
     ```
 
+- **Battery SOC status URL:**  
+    ```env
+    STATUS_URL="http://192.168.178.11/status/soc.txt"
+    ```
+    *URL to fetch the current battery state of charge (SOC) as a text file.*
+
+- **Site latitude (decimal degrees):**  
+    ```env
+    LATITUDE=50.0000
+    ```
+    *Geographic latitude of the installation site.*
+
+- **Site longitude (decimal degrees):**  
+    ```env
+    LONGITUDE=13.0000
+    ```
+    *Geographic longitude of the installation site.*
+
+- **Battery capacity (kWh):**  
+    ```env
+    BATTERY_SIZE_KWH=40.0
+    ```
+    *Total usable battery capacity in kilowatt-hours.*
+
+- **Photovoltaic system size (kWp):**  
+    ```env
+    PV_SIZE_KWP=10.0
+    ```
+    *Installed solar panel capacity in kilowatt-peak.*
+
+- **Base electrical load (kW):**  
+    ```env
+    BASE_LOAD_KW=0.5
+    ```
+    *Average background electrical consumption in kilowatts.*
+
+- **Heating off temperature (°C):**  
+    ```env
+    HEATING_OFF_TEMP_C=15.0
+    ```
+    *Outdoor temperature above which heating is turned off.*
+
+- **Heating energy use at 0°C (kWh/h):**  
+    ```env
+    HEATING_KWH_PER_H_AT_0C=1.5
+    ```
+    *Heating energy consumption per hour when outdoor temperature is 0°C.*
+
 ---

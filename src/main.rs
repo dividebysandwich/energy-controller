@@ -62,20 +62,14 @@ enum BatteryDecision {
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
-struct DailyForecast {
-    sunshine_duration: Vec<f64>,
-}
-
-#[derive(Deserialize, Debug, Clone, Default)]
 struct HourlyForecast {
     time: Vec<String>,
-    sunshine_duration: Vec<f64>,
     temperature_2m: Vec<f64>,
+    shortwave_radiation: Vec<f64>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
 struct WeatherResponse {
-    daily: DailyForecast,
     hourly: HourlyForecast,
 }
 
@@ -132,7 +126,7 @@ struct AppState {
     system_status: SystemStatus,
     status_message: String,
     expected_pv_kwh: f64,
-    hourly_sunshine: Vec<(f64, f64)>,
+    hourly_pv_kw: Vec<(f64, f64)>,
     hourly_heating_kw: Vec<(f64, f64)>,
 }
 
@@ -277,18 +271,20 @@ fn main() -> Result<()> {
                     }
 
                     // Parse hourly sunshine and heating for the chart
-                    let mut hourly_sunshine = vec![];
-                    let mut hourly_heating_kw = vec![];
+                    let mut hourly_pv_kw = vec![];
+                    let mut hourly_heating_kw = vec![]; 
 
                     if let Some(cache) = &weather_cache {
                         for (i, t_str) in cache.forecast.hourly.time.iter().enumerate() {
                             if let Ok(ndt) = NaiveDateTime::parse_from_str(t_str, "%Y-%m-%dT%H:%M") {
                                 if let Some(ts) = ndt.and_local_timezone(Tz::CET).single() {
-                                    // Parse Sun
-                                    let dur = cache.forecast.hourly.sunshine_duration.get(i).copied().unwrap_or(0.0);
-                                    hourly_sunshine.push((ts.timestamp() as f64, dur));
-
-                                    // NEW: Parse Temp and Calculate Heating kW
+                
+                                    // Parse PV
+                                    let radiation = cache.forecast.hourly.shortwave_radiation.get(i).copied().unwrap_or(0.0);
+                                    let pv_kw = config.pv_size_kwp * (radiation / 1000.0) * 0.85;
+                                    hourly_pv_kw.push((ts.timestamp() as f64, pv_kw));
+                
+                                    // Parse Heating
                                     let temp = cache.forecast.hourly.temperature_2m.get(i).copied().unwrap_or(0.0);
                                     let mut kw = 0.0;
                                     if temp < config.heating_off_temp_c {
@@ -311,7 +307,7 @@ fn main() -> Result<()> {
                         compressor_decision: final_compressor_decision,
                         soc_decision: optimized_soc,
                         expected_pv_kwh: expected_pv_kwh,
-                        hourly_sunshine: hourly_sunshine,
+                        hourly_pv_kw,
                         hourly_heating_kw: hourly_heating_kw,
                         system_status: current_status,
                         status_message,
@@ -389,7 +385,7 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
         .split(chunks[1]);
 
     if let Some(state) = app_state {
-        let (x_bounds, y_bounds, price_data, v_line_data, h_line_data, sun_data, heating_data) = prepare_chart_data(state);
+        let (x_bounds, y_bounds, price_data, v_line_data, h_line_data, pv_data, heating_data) = prepare_chart_data(state);
         let datasets = vec![
             Dataset::default()
                 .name("Current")
@@ -410,11 +406,11 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
                 .style(Style::default().fg(Color::Red))
                 .data(&heating_data),
             Dataset::default()
-                .name("Sun Forecast")
+                .name("PV Forecast")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(Color::Yellow))
-                .data(&sun_data),
+                .data(&pv_data),
             Dataset::default()
                 .name("Price")
                 .marker(symbols::Marker::Braille)
@@ -548,13 +544,13 @@ fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>,
 
     let y_range = y_bounds[1] - y_bounds[0];
     
-    // Create the sunshine dataset, pinned to the bottom of the chart
-    let sun_data: Vec<(f64, f64)> = state.hourly_sunshine.iter()
+    // PV Forecast Data
+    let pv_data: Vec<(f64, f64)> = state.hourly_pv_kw.iter()
         .filter(|(ts, _)| *ts >= x_bounds[0] && *ts <= x_bounds[1])
-        .map(|(ts, dur)| {
-            // 3600 seconds = 1 full hour of sun. Scale this to max 15% of the chart height.
-            let sun_height = (dur / 3600.0) * (y_range * 0.15);
-            (*ts, y_bounds[0] + sun_height)
+        .map(|(ts, kw)| {
+            // Scale so that 5.0 kW equals 25% of the chart's total height.
+            let scaled_y = y_bounds[0] + (kw / 5.0) * (y_range * 0.25);
+            (*ts, scaled_y)
         })
         .collect();
 
@@ -569,7 +565,7 @@ fn prepare_chart_data(state: &AppState) -> ([f64; 2], [f64; 2], Vec<(f64, f64)>,
         })
         .collect();
 
-    (x_bounds, y_bounds, price_data, v_line_data, h_line_data, sun_data, heating_data)
+    (x_bounds, y_bounds, price_data, v_line_data, h_line_data, pv_data, heating_data)
 }
 
 struct PriceThresholds {
@@ -724,15 +720,31 @@ fn run_price_analysis(
 
         // PV Forecast Overrides
         let is_winter = matches!(now.month(), 10..=12 | 1..=3);
-        
-        // Calculate how much energy the battery actually needs to reach 100%
+
         let missing_soc_percent = 100.0 - (current_status.soc as f64);
         let missing_kwh = config.battery_size_kwh * (missing_soc_percent / 100.0);
         
-        // Calculate expected PV yield for today based on Open-Meteo sunshine duration
-        let sunshine_seconds = weather.daily.sunshine_duration.first().copied().unwrap_or(0.0);
-        let seasonal_efficiency = if is_winter { 0.5 } else { 0.75 }; 
-        let expected_pv_kwh = config.pv_size_kwp * (sunshine_seconds / 3600.0) * seasonal_efficiency;
+        // Calculate expected PV for the REST OF TODAY using accurate W/m² radiation
+        let mut expected_pv_kwh = 0.0;
+        let today = now.with_timezone(&Tz::CET).date_naive();
+        
+        for (i, t_str) in weather.hourly.time.iter().enumerate() {
+            if let Ok(ndt) = NaiveDateTime::parse_from_str(t_str, "%Y-%m-%dT%H:%M") {
+                if let Some(ts) = ndt.and_local_timezone(Tz::CET).single() {
+                    // Only sum up the energy for hours that are still coming up today
+                    if ts >= now && ts.date_naive() == today {
+                        let radiation = weather.hourly.shortwave_radiation.get(i).copied().unwrap_or(0.0);
+                        
+                        // Panels are rated at 1000 W/m². 
+                        // 0.85 accounts for standard real-world system/inverter losses.
+                        let expected_kw = config.pv_size_kwp * (radiation / 1000.0) * 0.85;
+                        
+                        // 1 hour of expected_kw = expected_kwh
+                        expected_pv_kwh += expected_kw; 
+                    }
+                }
+            }
+        }
 
         if !is_winter {
             // In Summer/Spring/Autumn, favor PV.
@@ -771,7 +783,7 @@ impl AppState {
             system_status: SystemStatus::default(),
             status_message: status,
             expected_pv_kwh: 0.0,
-            hourly_sunshine: vec![],
+            hourly_pv_kw: vec![],
             hourly_heating_kw: vec![],
         }
     }
@@ -956,7 +968,7 @@ fn control_relay(
 fn fetch_weather(config: &Config, client: &Client) -> Result<WeatherResponse> {
     // Fetches today and tomorrow automatically based on timezone
     let url = format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&daily=sunshine_duration&hourly=sunshine_duration,temperature_2m&forecast_days=2&timezone=auto",
+        "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&hourly=temperature_2m,shortwave_radiation&forecast_days=2&timezone=auto",
         config.lat, config.lon
     );
     
@@ -996,7 +1008,7 @@ fn load_config() -> Result<Config> {
         lon: env::var("LONGITUDE").unwrap_or("16.3738".into()).parse()?,
         battery_size_kwh: env::var("BATTERY_SIZE_KWH").unwrap_or("10.0".into()).parse()?,
         pv_size_kwp: env::var("PV_SIZE_KWP").unwrap_or("5.0".into()).parse()?,
-        base_load_kw: env::var("BASE_LOAD_KW").unwrap_or("0.6".into()).parse()?, // 600W background load
+        base_load_kw: env::var("BASE_LOAD_KW").unwrap_or("0.5".into()).parse()?, // 500W background load
         heating_off_temp_c: env::var("HEATING_OFF_TEMP_C").unwrap_or("15.0".into()).parse()?, // Temp where heating stops
         heating_kwh_per_h_at_0c: env::var("HEATING_KWH_PER_H_AT_0C").unwrap_or("1.5".into()).parse()?,
     })
