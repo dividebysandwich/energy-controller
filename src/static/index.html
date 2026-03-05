@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -118,12 +119,29 @@
             font-weight: 600;
         }
 
-        .value-green { color: var(--accent-green); }
-        .value-red { color: var(--accent-red); }
-        .value-yellow { color: var(--accent-yellow); }
-        .value-blue { color: var(--accent-blue); }
-        .value-cyan { color: var(--accent-cyan); }
-        .value-orange { color: var(--accent-orange); }
+        .value-green {
+            color: var(--accent-green);
+        }
+
+        .value-red {
+            color: var(--accent-red);
+        }
+
+        .value-yellow {
+            color: var(--accent-yellow);
+        }
+
+        .value-blue {
+            color: var(--accent-blue);
+        }
+
+        .value-cyan {
+            color: var(--accent-cyan);
+        }
+
+        .value-orange {
+            color: var(--accent-orange);
+        }
 
         .status-message {
             margin-top: 16px;
@@ -138,7 +156,10 @@
 
         .loading-overlay {
             position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
             background: var(--bg-color);
             display: flex;
             justify-content: center;
@@ -156,11 +177,19 @@
             animation: spin 1s linear infinite;
         }
 
-        @keyframes spin { 100% { transform: rotate(360deg); } }
+        @keyframes spin {
+            100% {
+                transform: rotate(360deg);
+            }
+        }
 
-        .hidden { opacity: 0; pointer-events: none; }
+        .hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
     </style>
 </head>
+
 <body>
 
     <div id="loading" class="loading-overlay">
@@ -250,7 +279,7 @@
 
         function initChart() {
             const ctx = document.getElementById('mainChart').getContext('2d');
-            
+
             Chart.defaults.color = '#94a3b8';
             Chart.defaults.font.family = 'Inter';
 
@@ -291,19 +320,19 @@
 
         function updateChart(state) {
             const now = new Date();
-            
+
             // Filter prices to similar range as TUI (today and tomorrow)
             // Just graph all of them for simplicity, TUI filtered today/tmr.
             const priceData = state.prices.map(p => ({ x: new Date(p.from), y: p.price }));
-            
+
             // To scale PV and Heating, we need finding min/max price
             let minP = Math.min(...priceData.map(d => d.y));
             let maxP = Math.max(...priceData.map(d => d.y));
             let yRange = maxP - minP;
             if (yRange === 0) yRange = 10;
-            
+
             let yMin = minP * 0.95;
-            
+
             const pvData = state.hourly_pv_kw.map(d => {
                 let ts = d[0] * 1000;
                 let kw = d[1];
@@ -394,7 +423,7 @@
             document.getElementById('val-pv').innerText = `${state.system_status.pv_power.toFixed(1)} kW`;
             document.getElementById('val-exp-pv').innerText = `${state.expected_pv_kwh.toFixed(1)} kWh`;
             document.getElementById('val-load').innerText = `${state.system_status.load_power.toFixed(1)} kW`;
-            
+
             let gridEl = document.getElementById('val-grid');
             gridEl.innerText = `${state.system_status.grid_power.toFixed(1)} kW`;
             gridEl.className = 'data-value ' + (state.system_status.grid_power > 0 ? 'value-red' : 'value-green');
@@ -417,7 +446,7 @@
 
         async function fetchState() {
             try {
-                const res = await fetch('/api/state');
+                const res = await fetch('{{APP_CONTEXT_PATH}}/api/state');
                 const state = await res.json();
                 if (state) {
                     updateChart(state);
@@ -435,4 +464,5 @@
         };
     </script>
 </body>
+
 </html>
