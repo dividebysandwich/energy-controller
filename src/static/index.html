@@ -412,6 +412,13 @@
                     datasets: []
                 },
                 options: {
+                    elements: {
+                        point: {
+                            radius: 0,
+                            hitRadius: 10,
+                            hoverRadius: 4
+                        }
+                    },
                     responsive: true,
                     maintainAspectRatio: false,
                     interaction: {
@@ -470,6 +477,20 @@
                 return { x: new Date(ts), y: scaledY, origKw: kw };
             });
 
+            function mapHistogramFromWatts(histogram, scaleDivisor) {
+                if (!histogram) return [];
+                return histogram.map((point) => {
+                    const t = new Date(point[0]);
+                    const kw = point[1]; // Value is already in kW
+                    const scaledY = yMin + (kw / scaleDivisor) * yRange;
+                    return { x: t, y: scaledY, origKw: kw };
+                });
+            }
+
+            const actualPvData = mapHistogramFromWatts(state.system_status.pv_histogram, 5.0);
+            const actualHomeData = mapHistogramFromWatts(state.system_status.load_histogram, 5.0);
+            const actualGridData = mapHistogramFromWatts(state.system_status.grid_histogram, 5.0);
+
             if (chart.data.datasets.length === 0) {
                 chart.data.datasets = [
                     {
@@ -477,6 +498,15 @@
                         data: priceData,
                         borderColor: 'rgba(6, 182, 212, 1)',
                         backgroundColor: 'rgba(6, 182, 212, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.4,
+                        fill: true
+                    },
+                    {
+                        label: 'Actual PV (Scaled)',
+                        data: actualPvData,
+                        borderColor: 'rgba(234, 179, 8, 1)',
+                        backgroundColor: 'rgba(234, 179, 8, 0.2)',
                         borderWidth: 2,
                         tension: 0.4,
                         fill: true
@@ -490,6 +520,22 @@
                         tension: 0.4
                     },
                     {
+                        label: 'Home Usage (Scaled)',
+                        data: actualHomeData,
+                        borderColor: 'rgba(16, 185, 129, 1)',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.4,
+                        fill: true
+                    },
+                    {
+                        label: 'Grid Flow (Scaled)',
+                        data: actualGridData,
+                        borderColor: 'rgba(239, 68, 68, 1)',
+                        borderWidth: 2,
+                        tension: 0.4
+                    },
+                    {
                         label: 'Heat Load (Scaled)',
                         data: heatingData,
                         borderColor: 'rgba(239, 68, 68, 1)',
@@ -500,8 +546,11 @@
                 ];
             } else {
                 chart.data.datasets[0].data = priceData;
-                chart.data.datasets[1].data = pvData;
-                chart.data.datasets[2].data = heatingData;
+                chart.data.datasets[1].data = actualPvData;
+                chart.data.datasets[2].data = pvData;
+                chart.data.datasets[3].data = actualHomeData;
+                chart.data.datasets[4].data = actualGridData;
+                chart.data.datasets[5].data = heatingData;
             }
 
             // Annotations for Current Price Line and "Now" Line

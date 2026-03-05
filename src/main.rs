@@ -45,6 +45,27 @@ struct SystemStatus {
     load_power: f64,
     grid_power: f64,
     battery_power: f64,
+    soc_histogram: Vec<(i64, f64)>,
+    pv_histogram: Vec<(i64, f64)>,
+    load_histogram: Vec<(i64, f64)>,
+    grid_histogram: Vec<(i64, f64)>,
+    battuse_histogram: Vec<(i64, f64)>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+struct StatusDataPoint {
+    pub time: i64,
+    #[serde(rename = "BatterySOC")]
+    pub battery_soc: f64,
+    #[serde(rename = "PV")]
+    pub pv: f64,
+    #[serde(rename = "Consumption")]
+    pub consumption: f64,
+    #[serde(rename = "Grid")]
+    pub grid: f64,
+    #[serde(rename = "BatteryPower")]
+    pub battery_power: f64,
 }
 
 /// Represents the desired state of the heatpump compressor.
@@ -1103,47 +1124,38 @@ fn fetch_system_status(client: &Client, url: &str) -> Result<SystemStatus> {
         return Err(anyhow::anyhow!("Status URL returned {}", response.status()));
     }
 
-    let text = response.text()?;
-    let lines: Vec<&str> = text.lines().collect();
+    let payload: Vec<StatusDataPoint> = response.json().context("Failed to parse status JSON")?;
 
-    if lines.len() < 5 {
-        return Err(anyhow::anyhow!("Status file has insufficient lines"));
+    if payload.is_empty() {
+        return Err(anyhow::anyhow!("Status URL returned an empty array"));
     }
 
-    // Parse lines based on provided format
-    // Line 0: SOC (int)
-    // Line 1: PV (float)
-    // Line 2: House (float)
-    // Line 3: Grid (float)
-    // Line 4: Battery Pwr (float)
+    let current = payload.last().unwrap();
 
-    let soc = lines[0]
-        .trim()
-        .parse::<u8>()
-        .context("Failed to parse SOC")?;
-    let pv = lines[1]
-        .trim()
-        .parse::<f64>()
-        .context("Failed to parse PV")?;
-    let load = lines[2]
-        .trim()
-        .parse::<f64>()
-        .context("Failed to parse Load")?;
-    let grid = lines[3]
-        .trim()
-        .parse::<f64>()
-        .context("Failed to parse Grid")?;
-    let batt = lines[4]
-        .trim()
-        .parse::<f64>()
-        .context("Failed to parse Battery Power")?;
+    let soc_histogram: Vec<(i64, f64)> = payload.iter().map(|p| (p.time, p.battery_soc)).collect();
+    let pv_histogram: Vec<(i64, f64)> = payload.iter().map(|p| (p.time, p.pv / 1000.0)).collect();
+    let consumption_histogram: Vec<(i64, f64)> = payload
+        .iter()
+        .map(|p| (p.time, p.consumption / 1000.0))
+        .collect();
+    let grid_histogram: Vec<(i64, f64)> =
+        payload.iter().map(|p| (p.time, p.grid / 1000.0)).collect();
+    let battuse_histogram: Vec<(i64, f64)> = payload
+        .iter()
+        .map(|p| (p.time, p.battery_power / 1000.0))
+        .collect();
 
     Ok(SystemStatus {
-        soc,
-        pv_power: pv,
-        load_power: load,
-        grid_power: grid,
-        battery_power: batt,
+        soc: current.battery_soc as u8,
+        pv_power: current.pv / 1000.0,
+        load_power: current.consumption / 1000.0,
+        grid_power: current.grid / 1000.0,
+        battery_power: current.battery_power / 1000.0,
+        soc_histogram,
+        pv_histogram,
+        load_histogram: consumption_histogram,
+        grid_histogram,
+        battuse_histogram,
     })
 }
 
