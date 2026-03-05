@@ -1195,8 +1195,9 @@ fn update_price_data(
     client: &Client,
 ) -> Result<()> {
     // Remove old price data from the front of the queue.
+    let today = now.with_timezone(&Tz::CET).date_naive();
     while let Some(front) = prices.front() {
-        if front.from < now - Duration::hours(1) {
+        if front.from.with_timezone(&Tz::CET).date_naive() < today {
             prices.pop_front();
         } else {
             break;
