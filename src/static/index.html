@@ -336,14 +336,14 @@
             const pvData = state.hourly_pv_kw.map(d => {
                 let ts = d[0] * 1000;
                 let kw = d[1];
-                let scaledY = yMin + (kw / 5.0) * (yRange * 0.25);
+                let scaledY = yMin + (kw / 5.0) * yRange;
                 return { x: new Date(ts), y: scaledY, origKw: kw };
             });
 
             const heatingData = state.hourly_heating_kw.map(d => {
                 let ts = d[0] * 1000;
                 let kw = d[1];
-                let scaledY = yMin + (kw / 5.0) * (yRange * 0.30);
+                let scaledY = yMin + (kw / 5.0) * yRange;
                 return { x: new Date(ts), y: scaledY, origKw: kw };
             });
 

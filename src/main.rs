@@ -764,8 +764,7 @@ fn prepare_chart_data(
         .iter()
         .filter(|(ts, _)| *ts >= x_bounds[0] && *ts <= x_bounds[1])
         .map(|(ts, kw)| {
-            // Scale so that 5.0 kW equals 25% of the chart's total height.
-            let scaled_y = y_bounds[0] + (kw / 5.0) * (y_range * 0.25);
+            let scaled_y = y_bounds[0] + (kw / 5.0) * y_range;
             (*ts, scaled_y)
         })
         .collect();
@@ -776,9 +775,7 @@ fn prepare_chart_data(
         .iter()
         .filter(|(ts, _)| *ts >= x_bounds[0] && *ts <= x_bounds[1])
         .map(|(ts, kw)| {
-            // Scale so that 5.0 kW equals 30% of the chart's total height.
-            // TODO: Make configurable for user's particular heatpump power draw
-            let scaled_y = y_bounds[0] + (kw / 5.0) * (y_range * 0.30);
+            let scaled_y = y_bounds[0] + (kw / 5.0) * y_range;
             (*ts, scaled_y)
         })
         .collect();
