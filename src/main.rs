@@ -189,9 +189,9 @@ fn main() -> Result<()> {
         loop {
             let now = Utc::now();
 
-            // Fetch weather twice a day (every 12 hours) or if missing
+            // Fetch weather every hour or if missing
             let needs_weather_update = weather_cache.as_ref().map_or(true, |cache| {
-                now.signed_duration_since(cache.last_fetched).num_hours() >= 12
+                now.signed_duration_since(cache.last_fetched).num_hours() >= 1
             });
 
             if needs_weather_update {
