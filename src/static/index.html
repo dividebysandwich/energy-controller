@@ -231,29 +231,152 @@
 
             <div class="card">
                 <h2 class="panel-title">Live System Status</h2>
-                <div class="data-row">
-                    <span class="data-label">SOC</span>
-                    <span class="data-value value-cyan" id="val-soc">-- %</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">PV</span>
-                    <span class="data-value value-yellow" id="val-pv">-- kW</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Expected PV</span>
-                    <span class="data-value value-yellow" style="opacity: 0.8" id="val-exp-pv">-- kWh</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Load</span>
-                    <span class="data-value value-blue" id="val-load">-- kW</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Grid</span>
-                    <span class="data-value" id="val-grid">-- kW</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Battery Power</span>
-                    <span class="data-value" id="val-batt">-- kW</span>
+                <div class="live-status-graphic">
+                    <svg viewBox="0 0 400 320" width="100%" height="auto">
+                        <defs>
+                            <style>
+                                .base-line {
+                                    stroke: rgba(255, 255, 255, 0.2);
+                                    stroke-width: 6;
+                                    stroke-linecap: round;
+                                }
+
+                                .flow-line {
+                                    fill: none;
+                                    stroke: rgba(255, 255, 255, 0.9);
+                                    stroke-width: 6;
+                                    stroke-linecap: round;
+                                    stroke-dasharray: 10 20;
+                                    opacity: 0;
+                                }
+
+                                .flow-active {
+                                    opacity: 1;
+                                }
+
+                                .flow-forward {
+                                    animation: flow-fwd 1s linear infinite;
+                                }
+
+                                .flow-backward {
+                                    animation: flow-bwd 1s linear infinite;
+                                }
+
+                                @keyframes flow-fwd {
+                                    from {
+                                        stroke-dashoffset: 30;
+                                    }
+
+                                    to {
+                                        stroke-dashoffset: 0;
+                                    }
+                                }
+
+                                @keyframes flow-bwd {
+                                    from {
+                                        stroke-dashoffset: 0;
+                                    }
+
+                                    to {
+                                        stroke-dashoffset: 30;
+                                    }
+                                }
+
+                                .icon-text {
+                                    font-family: 'Inter', sans-serif;
+                                    font-size: 16px;
+                                    font-weight: 600;
+                                }
+
+                                .text-cyan {
+                                    fill: var(--accent-cyan);
+                                }
+
+                                .text-yellow {
+                                    fill: var(--accent-yellow);
+                                }
+
+                                .text-green {
+                                    fill: var(--accent-green);
+                                }
+
+                                .text-red {
+                                    fill: var(--accent-red);
+                                }
+
+                                .text-blue {
+                                    fill: var(--accent-blue);
+                                }
+                            </style>
+                        </defs>
+
+                        <!-- Base connection lines -->
+                        <path class="base-line" d="M 200 80 L 200 130" /> <!-- PV -->
+                        <path class="base-line" d="M 330 160 L 230 160" /> <!-- Grid -->
+                        <path class="base-line" d="M 200 190 L 200 240" /> <!-- Home -->
+                        <path class="base-line" d="M 170 160 L 70 160" /> <!-- Battery -->
+
+                        <!-- Flow lines -->
+                        <path id="flow-pv" class="flow-line" d="M 200 80 L 200 130" />
+                        <path id="flow-grid" class="flow-line" d="M 330 160 L 230 160" />
+                        <path id="flow-home" class="flow-line" d="M 200 190 L 200 240" />
+                        <path id="flow-batt" class="flow-line" d="M 170 160 L 70 160" />
+
+                        <!-- Inverter (Center) -->
+                        <rect x="170" y="130" width="60" height="60" rx="8" stroke="white" stroke-width="2"
+                            fill="var(--bg-color)" />
+                        <line x1="175" y1="185" x2="225" y2="135" stroke="white" stroke-width="2" />
+                        <line x1="180" y1="145" x2="195" y2="145" stroke="white" stroke-width="2" />
+                        <line x1="180" y1="155" x2="205" y2="155" stroke="white" stroke-width="2" />
+                        <path d="M 200 175 Q 205 162 210 175 T 220 175" stroke="white" fill="none" stroke-width="2" />
+
+                        <!-- PV (Top) -->
+                        <g transform="translate(180, 20)">
+                            <circle cx="20" cy="15" r="8" fill="var(--accent-yellow)" />
+                            <path
+                                d="M 20 2 L 20 5 M 20 25 L 20 28 M 7 15 L 10 15 M 30 15 L 33 15 M 10 6 L 12 8 M 28 22 L 30 24 M 10 24 L 12 22 M 28 6 L 30 8"
+                                stroke="var(--accent-yellow)" stroke-width="2" stroke-linecap="round" />
+                            <!-- Solar panel -->
+                            <path d="M 6 45 L 34 45 L 30 35 L 10 35 Z" fill="var(--accent-yellow)" />
+                            <path d="M 14 35 L 12 45 M 20 35 L 20 45 M 26 35 L 28 45 M 6 40 L 34 40"
+                                stroke="var(--bg-color)" stroke-width="1.5" />
+                        </g>
+                        <text id="text-pv" x="235" y="45" class="icon-text text-yellow">-- kW</text>
+                        <text id="text-exp-pv" x="235" y="65" class="icon-text text-yellow"
+                            style="opacity: 0.8; font-size: 12px;">-- kWh (exp)</text>
+
+                        <!-- Home (Bottom) -->
+                        <g transform="translate(175, 240)">
+                            <polygon points="25,5 50,25 0,25" fill="var(--accent-green)" />
+                            <rect x="5" y="25" width="40" height="30" fill="var(--accent-green)" />
+                            <rect x="12" y="32" width="10" height="10" fill="var(--bg-color)" />
+                            <rect x="28" y="35" width="10" height="20" fill="var(--bg-color)" />
+                        </g>
+                        <text id="text-home" x="240" y="275" class="icon-text text-green">-- kW</text>
+
+                        <!-- Grid (Right) -->
+                        <g transform="translate(330, 115)">
+                            <path
+                                d="M 25 10 L 10 70 M 25 10 L 40 70 M 15 55 L 35 55 M 18 40 L 32 40 M 5 25 L 45 25 M 10 40 L 40 40"
+                                stroke="var(--accent-red)" stroke-width="2" fill="none" />
+                            <path
+                                d="M 13 25 L 32 40 M 37 25 L 18 40 M 15 40 L 35 55 M 35 40 L 15 55 M 10 55 L 35 70 M 40 55 L 15 70"
+                                stroke="var(--accent-red)" stroke-width="1" fill="none" />
+                        </g>
+                        <text id="text-grid" x="250" y="185" class="icon-text text-red">-- kW</text>
+
+                        <!-- Battery (Left) -->
+                        <g transform="translate(10, 110)">
+                            <rect x="30" y="0" width="10" height="5" fill="var(--accent-blue)" />
+                            <rect x="10" y="5" width="50" height="95" rx="4" stroke="var(--accent-blue)"
+                                stroke-width="3" fill="none" />
+                            <rect id="batt-fill" x="13" y="10" width="44" height="87" rx="2"
+                                fill="var(--accent-blue)" />
+                            <text id="text-soc" x="35" y="58" class="icon-text" fill="white" font-size="14px"
+                                text-anchor="middle" style="text-shadow: 1px 1px 2px black;">-- %</text>
+                        </g>
+                        <text id="text-batt" x="80" y="185" class="icon-text text-blue">-- kW</text>
+                    </svg>
                 </div>
             </div>
 
@@ -425,18 +548,49 @@
             document.getElementById('val-spike-price').innerText = `${state.spike_threshold.toFixed(2)} c`;
 
             // System Status
-            document.getElementById('val-soc').innerText = `${state.system_status.soc}%`;
-            document.getElementById('val-pv').innerText = `${state.system_status.pv_power.toFixed(1)} kW`;
-            document.getElementById('val-exp-pv').innerText = `${state.expected_pv_kwh.toFixed(1)} kWh`;
-            document.getElementById('val-load').innerText = `${state.system_status.load_power.toFixed(1)} kW`;
+            let soc = state.system_status.soc;
+            document.getElementById('text-soc').textContent = `${soc}%`;
+            let battHeight = Math.max(0, 87 * (soc / 100));
+            let battY = 97 - battHeight;
+            let battFill = document.getElementById('batt-fill');
+            if (battFill) {
+                battFill.setAttribute('y', battY);
+                battFill.setAttribute('height', battHeight);
+            }
 
-            let gridEl = document.getElementById('val-grid');
-            gridEl.innerText = `${state.system_status.grid_power.toFixed(1)} kW`;
-            gridEl.className = 'data-value ' + (state.system_status.grid_power > 0 ? 'value-red' : 'value-green');
+            let pvKw = state.system_status.pv_power;
+            document.getElementById('text-pv').textContent = `${pvKw.toFixed(1)} kW`;
+            document.getElementById('text-exp-pv').textContent = `${state.expected_pv_kwh.toFixed(1)} kWh (exp)`;
 
-            let battEl = document.getElementById('val-batt');
-            battEl.innerText = `${state.system_status.battery_power.toFixed(1)} kW`;
-            battEl.className = 'data-value ' + (state.system_status.battery_power < 0 ? 'value-red' : 'value-green'); // Discharge is often negative in some systems
+            let loadKw = state.system_status.load_power;
+            document.getElementById('text-home').textContent = `${loadKw.toFixed(1)} kW`;
+
+            let gridKw = state.system_status.grid_power;
+            document.getElementById('text-grid').textContent = `${gridKw.toFixed(1)} kW`;
+
+            let battKw = state.system_status.battery_power;
+            document.getElementById('text-batt').textContent = `${battKw.toFixed(1)} kW`;
+
+            function updateFlowConfig(id, power) {
+                let el = document.getElementById(id);
+                if (!el) return;
+                if (Math.abs(power) < 0.05) {
+                    el.className.baseVal = 'flow-line';
+                } else {
+                    let speed = Math.max(0.2, 1.5 - Math.abs(power) * 0.15);
+                    el.style.animationDuration = `${speed}s`;
+                    if (power > 0) {
+                        el.className.baseVal = 'flow-line flow-active flow-forward';
+                    } else {
+                        el.className.baseVal = 'flow-line flow-active flow-backward';
+                    }
+                }
+            }
+
+            updateFlowConfig('flow-pv', pvKw);
+            updateFlowConfig('flow-grid', gridKw);
+            updateFlowConfig('flow-home', loadKw);
+            updateFlowConfig('flow-batt', battKw);
 
             // Decisions
             let hpEl = document.getElementById('val-heatpump');
