@@ -436,13 +436,43 @@
                             grid: { color: 'rgba(255, 255, 255, 0.05)' }
                         },
                         y: {
-                            title: { display: true, text: 'c/kWh & (Scaled) Power' },
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            title: { display: true, text: 'Price (c/kWh)' },
                             grid: { color: 'rgba(255, 255, 255, 0.05)' }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: { display: true, text: 'Power (kW)' },
+                            grid: { drawOnChartArea: false } // Only draw grid for one axis
                         }
                     },
                     plugins: {
                         legend: { position: 'top' },
-                        tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.9)', titleColor: '#fff', bodyColor: '#ccc' },
+                        tooltip: {
+                            backgroundColor: 'rgba(15, 23, 42, 0.9)',
+                            titleColor: '#fff',
+                            bodyColor: '#ccc',
+                            callbacks: {
+                                label: function (context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed.y !== null) {
+                                        if (context.dataset.yAxisID === 'y1') {
+                                            label += context.parsed.y.toFixed(2) + ' kW';
+                                        } else {
+                                            label += context.parsed.y.toFixed(2) + ' c/kWh';
+                                        }
+                                    }
+                                    return label;
+                                }
+                            }
+                        },
                         annotation: { annotations: {} }
                     }
                 }
@@ -467,30 +497,27 @@
             const pvData = state.hourly_pv_kw.map(d => {
                 let ts = d[0] * 1000;
                 let kw = d[1];
-                let scaledY = yMin + (kw / 5.0) * yRange;
-                return { x: new Date(ts), y: scaledY, origKw: kw };
+                return { x: new Date(ts), y: kw };
             });
 
             const heatingData = state.hourly_heating_kw.map(d => {
                 let ts = d[0] * 1000;
                 let kw = d[1];
-                let scaledY = yMin + (kw / 5.0) * yRange;
-                return { x: new Date(ts), y: scaledY, origKw: kw };
+                return { x: new Date(ts), y: kw };
             });
 
-            function mapHistogramFromWatts(histogram, scaleDivisor) {
+            function mapHistogramFromWatts(histogram) {
                 if (!histogram) return [];
                 return histogram.map((point) => {
                     const t = new Date(point[0]);
                     const kw = point[1]; // Value is already in kW
-                    const scaledY = yMin + (kw / scaleDivisor) * yRange;
-                    return { x: t, y: scaledY, origKw: kw };
+                    return { x: t, y: kw };
                 });
             }
 
-            const actualPvData = mapHistogramFromWatts(state.system_status.pv_histogram, 5.0);
-            const actualHomeData = mapHistogramFromWatts(state.system_status.load_histogram, 5.0);
-            const actualGridData = mapHistogramFromWatts(state.system_status.grid_histogram, 5.0);
+            const actualPvData = mapHistogramFromWatts(state.system_status.pv_histogram);
+            const actualHomeData = mapHistogramFromWatts(state.system_status.load_histogram);
+            const actualGridData = mapHistogramFromWatts(state.system_status.grid_histogram);
 
             if (chart.data.datasets.length === 0) {
                 chart.data.datasets = [
@@ -501,48 +528,54 @@
                         backgroundColor: 'rgba(6, 182, 212, 0.1)',
                         borderWidth: 2,
                         tension: 0.4,
-                        fill: true
+                        fill: true,
+                        yAxisID: 'y'
                     },
                     {
-                        label: 'Actual PV (Scaled)',
+                        label: 'Actual PV',
                         data: actualPvData,
                         borderColor: 'rgba(234, 179, 8, 1)',
                         backgroundColor: 'rgba(234, 179, 8, 0.2)',
                         borderWidth: 2,
                         tension: 0.4,
-                        fill: true
+                        fill: true,
+                        yAxisID: 'y1'
                     },
                     {
-                        label: 'PV Forecast (Scaled)',
+                        label: 'PV Forecast',
                         data: pvData,
                         borderColor: 'rgba(234, 179, 8, 1)',
                         borderWidth: 2,
                         borderDash: [5, 5],
-                        tension: 0.4
+                        tension: 0.4,
+                        yAxisID: 'y1'
                     },
                     {
-                        label: 'Home Usage (Scaled)',
+                        label: 'Home Usage',
                         data: actualHomeData,
                         borderColor: 'rgba(16, 185, 129, 1)',
                         backgroundColor: 'rgba(16, 185, 129, 0.1)',
                         borderWidth: 2,
                         tension: 0.4,
-                        fill: true
+                        fill: true,
+                        yAxisID: 'y1'
                     },
                     {
-                        label: 'Grid Flow (Scaled)',
+                        label: 'Grid Flow',
                         data: actualGridData,
                         borderColor: 'rgba(239, 68, 68, 1)',
                         borderWidth: 2,
-                        tension: 0.4
+                        tension: 0.4,
+                        yAxisID: 'y1'
                     },
                     {
-                        label: 'Heat Load (Scaled)',
+                        label: 'Heat Load',
                         data: heatingData,
                         borderColor: 'rgba(239, 68, 68, 1)',
                         borderWidth: 2,
                         borderDash: [5, 5],
-                        tension: 0.4
+                        tension: 0.4,
+                        yAxisID: 'y1'
                     }
                 ];
             } else {
