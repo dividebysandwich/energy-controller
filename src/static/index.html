@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Energy Controller Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3"></script>
+
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
+            --accent-blue: #3b82f6;
+            --accent-cyan: #06b6d4;
+            --accent-orange: #f59e0b;
+            --accent-yellow: #eab308;
+            --accent-magenta: #d946ef;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+            min-height: 100vh;
+            background-image: radial-gradient(circle at top right, #1e1b4b, #0f172a);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 600;
+            background: linear-gradient(to right, #60a5fa, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        #last-updated {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(12px);
+            transition: transform 0.2s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .chart-container {
+            height: 400px;
+            width: 100%;
+            position: relative;
+        }
+
+        .grid-panels {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .panel-title {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-top: 0;
+            margin-bottom: 16px;
+            color: var(--text-main);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding-bottom: 8px;
+        }
+
+        .data-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            font-size: 0.95rem;
+        }
+
+        .data-label {
+            color: var(--text-muted);
+        }
+
+        .data-value {
+            font-weight: 600;
+        }
+
+        .value-green { color: var(--accent-green); }
+        .value-red { color: var(--accent-red); }
+        .value-yellow { color: var(--accent-yellow); }
+        .value-blue { color: var(--accent-blue); }
+        .value-cyan { color: var(--accent-cyan); }
+        .value-orange { color: var(--accent-orange); }
+
+        .status-message {
+            margin-top: 16px;
+            padding: 12px;
+            background: rgba(234, 179, 8, 0.1);
+            border-left: 4px solid var(--accent-yellow);
+            border-radius: 4px;
+            color: var(--accent-yellow);
+            font-size: 0.9rem;
+            line-height: 1.4;
+        }
+
+        .loading-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--bg-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 50;
+            transition: opacity 0.5s ease;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+
+        .hidden { opacity: 0; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+    <div id="loading" class="loading-overlay">
+        <div class="spinner"></div>
+    </div>
+
+    <div class="container">
+        <header>
+            <h1>Energy Controller Dashboard</h1>
+            <div id="last-updated">Waiting for data...</div>
+        </header>
+
+        <div class="card">
+            <div class="chart-container">
+                <canvas id="mainChart"></canvas>
+            </div>
+        </div>
+
+        <div class="grid-panels">
+            <div class="card">
+                <h2 class="panel-title">Thresholds</h2>
+                <div class="data-row">
+                    <span class="data-label">Current Price</span>
+                    <span class="data-value" id="val-curr-price">-- c</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Low &lt;</span>
+                    <span class="data-value value-green" id="val-low-price">-- c</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Block &gt;</span>
+                    <span class="data-value value-orange" id="val-block-price">-- c</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Spike &gt;</span>
+                    <span class="data-value value-red" id="val-spike-price">-- c</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2 class="panel-title">Live System Status</h2>
+                <div class="data-row">
+                    <span class="data-label">SOC</span>
+                    <span class="data-value value-cyan" id="val-soc">-- %</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">PV</span>
+                    <span class="data-value value-yellow" id="val-pv">-- kW</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Expected PV</span>
+                    <span class="data-value value-yellow" style="opacity: 0.8" id="val-exp-pv">-- kWh</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Load</span>
+                    <span class="data-value value-blue" id="val-load">-- kW</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Grid</span>
+                    <span class="data-value" id="val-grid">-- kW</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Battery Power</span>
+                    <span class="data-value" id="val-batt">-- kW</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2 class="panel-title">Decisions</h2>
+                <div class="data-row">
+                    <span class="data-label">Heatpump</span>
+                    <span class="data-value" id="val-heatpump">--</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Set Min SOC</span>
+                    <span class="data-value value-cyan" id="val-set-soc">-- %</span>
+                </div>
+                <div class="status-message" id="val-status-msg">
+                    Waiting for status...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let chart = null;
+
+        function initChart() {
+            const ctx = document.getElementById('mainChart').getContext('2d');
+            
+            Chart.defaults.color = '#94a3b8';
+            Chart.defaults.font.family = 'Inter';
+
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: []
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'hour',
+                                displayFormats: { hour: 'HH:mm' }
+                            },
+                            grid: { color: 'rgba(255, 255, 255, 0.05)' }
+                        },
+                        y: {
+                            title: { display: true, text: 'c/kWh & (Scaled) Power' },
+                            grid: { color: 'rgba(255, 255, 255, 0.05)' }
+                        }
+                    },
+                    plugins: {
+                        legend: { position: 'top' },
+                        tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.9)', titleColor: '#fff', bodyColor: '#ccc' },
+                        annotation: { annotations: {} }
+                    }
+                }
+            });
+        }
+
+        function updateChart(state) {
+            const now = new Date();
+            
+            // Filter prices to similar range as TUI (today and tomorrow)
+            // Just graph all of them for simplicity, TUI filtered today/tmr.
+            const priceData = state.prices.map(p => ({ x: new Date(p.from), y: p.price }));
+            
+            // To scale PV and Heating, we need finding min/max price
+            let minP = Math.min(...priceData.map(d => d.y));
+            let maxP = Math.max(...priceData.map(d => d.y));
+            let yRange = maxP - minP;
+            if (yRange === 0) yRange = 10;
+            
+            let yMin = minP * 0.95;
+            
+            const pvData = state.hourly_pv_kw.map(d => {
+                let ts = d[0] * 1000;
+                let kw = d[1];
+                let scaledY = yMin + (kw / 5.0) * (yRange * 0.25);
+                return { x: new Date(ts), y: scaledY, origKw: kw };
+            });
+
+            const heatingData = state.hourly_heating_kw.map(d => {
+                let ts = d[0] * 1000;
+                let kw = d[1];
+                let scaledY = yMin + (kw / 5.0) * (yRange * 0.30);
+                return { x: new Date(ts), y: scaledY, origKw: kw };
+            });
+
+            chart.data.datasets = [
+                {
+                    label: 'Price (c/kWh)',
+                    data: priceData,
+                    borderColor: 'rgba(6, 182, 212, 1)',
+                    backgroundColor: 'rgba(6, 182, 212, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    fill: true
+                },
+                {
+                    label: 'PV Forecast (Scaled)',
+                    data: pvData,
+                    borderColor: 'rgba(234, 179, 8, 1)',
+                    borderWidth: 2,
+                    borderDash: [5, 5],
+                    tension: 0.4
+                },
+                {
+                    label: 'Heat Load (Scaled)',
+                    data: heatingData,
+                    borderColor: 'rgba(239, 68, 68, 1)',
+                    borderWidth: 2,
+                    borderDash: [5, 5],
+                    tension: 0.4
+                }
+            ];
+
+            // Annotations for Current Price Line and "Now" Line
+            chart.options.plugins.annotation.annotations = {
+                lineNow: {
+                    type: 'line',
+                    xMin: now,
+                    xMax: now,
+                    borderColor: 'rgba(16, 185, 129, 0.8)',
+                    borderWidth: 2,
+                    label: {
+                        display: true,
+                        content: 'Now',
+                        position: 'start',
+                        backgroundColor: 'rgba(16, 185, 129, 0.8)'
+                    }
+                },
+                lineCurrentPrice: {
+                    type: 'line',
+                    yMin: state.current_price,
+                    yMax: state.current_price,
+                    borderColor: 'rgba(217, 70, 239, 0.5)',
+                    borderWidth: 2,
+                    borderDash: [5, 5],
+                    label: {
+                        display: true,
+                        content: 'Current Price',
+                        position: 'end',
+                        backgroundColor: 'rgba(217, 70, 239, 0.5)'
+                    }
+                }
+            };
+
+            chart.update();
+        }
+
+        function updateDOM(state) {
+            document.getElementById('last-updated').innerText = `Last updated: ${new Date().toLocaleTimeString()}`;
+
+            // Thresholds
+            document.getElementById('val-curr-price').innerText = `${state.current_price.toFixed(2)} c`;
+            document.getElementById('val-low-price').innerText = `${state.low_price_threshold.toFixed(2)} c`;
+            document.getElementById('val-block-price').innerText = `${state.block_threshold.toFixed(2)} c`;
+            document.getElementById('val-spike-price').innerText = `${state.spike_threshold.toFixed(2)} c`;
+
+            // System Status
+            document.getElementById('val-soc').innerText = `${state.system_status.soc}%`;
+            document.getElementById('val-pv').innerText = `${state.system_status.pv_power.toFixed(1)} kW`;
+            document.getElementById('val-exp-pv').innerText = `${state.expected_pv_kwh.toFixed(1)} kWh`;
+            document.getElementById('val-load').innerText = `${state.system_status.load_power.toFixed(1)} kW`;
+            
+            let gridEl = document.getElementById('val-grid');
+            gridEl.innerText = `${state.system_status.grid_power.toFixed(1)} kW`;
+            gridEl.className = 'data-value ' + (state.system_status.grid_power > 0 ? 'value-red' : 'value-green');
+
+            let battEl = document.getElementById('val-batt');
+            battEl.innerText = `${state.system_status.battery_power.toFixed(1)} kW`;
+            battEl.className = 'data-value ' + (state.system_status.battery_power < 0 ? 'value-red' : 'value-green'); // Discharge is often negative in some systems
+
+            // Decisions
+            let hpEl = document.getElementById('val-heatpump');
+            hpEl.innerText = state.compressor_decision;
+            hpEl.className = 'data-value ' + (state.compressor_decision === 'Allowed' ? 'value-green' : 'value-red');
+
+            document.getElementById('val-set-soc').innerText = `${state.soc_decision}%`;
+            document.getElementById('val-status-msg').innerText = state.status_message;
+
+            // Hide loading
+            document.getElementById('loading').classList.add('hidden');
+        }
+
+        async function fetchState() {
+            try {
+                const res = await fetch('/api/state');
+                const state = await res.json();
+                if (state) {
+                    updateChart(state);
+                    updateDOM(state);
+                }
+            } catch (err) {
+                console.error("Failed to fetch state:", err);
+            }
+        }
+
+        window.onload = () => {
+            initChart();
+            fetchState();
+            setInterval(fetchState, 60000); // Every minute
+        };
+    </script>
+</body>
+</html>
