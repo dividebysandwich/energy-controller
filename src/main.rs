@@ -208,9 +208,8 @@ fn main() -> Result<()> {
             }
 
             // Fetch price every hour
-            let needs_price_update = last_price_fetch.map_or(true, |t| {
-                now.signed_duration_since(t).num_hours() >= 1
-            });
+            let needs_price_update =
+                last_price_fetch.map_or(true, |t| now.signed_duration_since(t).num_hours() >= 1);
 
             if needs_price_update {
                 prices.clear();
@@ -856,7 +855,7 @@ fn calculate_required_soc(
                 .get(idx)
                 .copied()
                 .unwrap_or(0.0);
-            
+
             radiation = weather
                 .hourly
                 .shortwave_radiation

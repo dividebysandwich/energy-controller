@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alarm Keypad - Energy Controller</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
+            --accent-blue: #3b82f6;
+            --accent-cyan: #06b6d4;
+            --accent-orange: #f59e0b;
+            --accent-yellow: #eab308;
+            --accent-magenta: #d946ef;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+            min-height: 100vh;
+            background-image: radial-gradient(circle at top right, #1e1b4b, #0f172a);
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 600;
+            background: linear-gradient(to right, #60a5fa, #c084fc);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        #last-updated {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(12px);
+            transition: transform 0.2s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .grid-panels {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+        }
+
+        .panel-title {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-top: 0;
+            margin-bottom: 16px;
+            color: var(--text-main);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: var(--bg-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 50;
+            transition: opacity 0.5s ease;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        
+        /* Keypad Styles */
+        .keypad-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 24px;
+            margin-top: 20px;
+        }
+
+        .password-display {
+            font-size: 3rem;
+            letter-spacing: 0.5rem;
+            height: 70px;
+            line-height: 70px;
+            width: 100%;
+            max-width: 340px;
+            text-align: center;
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.1);
+            color: var(--text-main);
+            font-family: monospace;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+        }
+
+        .keys-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            width: 100%;
+            max-width: 340px;
+        }
+
+        .key-btn {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            color: var(--text-main);
+            font-size: 2rem;
+            font-weight: 500;
+            padding: 20px 0;
+            cursor: pointer;
+            transition: all 0.1s ease;
+            user-select: none;
+        }
+
+        .key-btn:active {
+            transform: scale(0.95);
+            background: rgba(255,255,255,0.15);
+        }
+
+        .key-btn:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
+        .key-action {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .key-clear {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--accent-red);
+            border-color: rgba(239, 68, 68, 0.2);
+        }
+        
+        .key-clear:hover {
+            background: rgba(239, 68, 68, 0.2);
+        }
+
+        .key-enter {
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--accent-green);
+            border-color: rgba(16, 185, 129, 0.2);
+        }
+        
+        .key-enter:hover {
+            background: rgba(16, 185, 129, 0.2);
+        }
+
+        .status-badge {
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .status-armed {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--accent-red);
+            border: 1px solid var(--accent-red);
+        }
+
+        .status-disarmed {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--accent-green);
+            border: 1px solid var(--accent-green);
+        }
+
+        .status-alarm {
+            background: rgba(239, 68, 68, 0.5);
+            color: #fff;
+            border: 1px solid var(--accent-red);
+            animation: flash 1s infinite alternate;
+        }
+
+        .status-unknown {
+            background: rgba(148, 163, 184, 0.2);
+            color: var(--text-muted);
+            border: 1px solid var(--text-muted);
+        }
+
+        @keyframes flash {
+            0% { background: rgba(239, 68, 68, 0.5); box-shadow: 0 0 10px rgba(239,68,68,0); }
+            100% { background: rgba(239, 68, 68, 1); box-shadow: 0 0 20px rgba(239,68,68,0.8); }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="loading" class="loading-overlay">
+        <div class="spinner"></div>
+    </div>
+
+    <div class="container">
+        <header>
+            <h1>Energy Controller Dashboard</h1>
+            <div id="last-updated">Waiting for data...</div>
+        </header>
+
+        <div class="grid-panels">
+            <div class="card">
+                <h2 class="panel-title">Live System Status</h2>
+                <div class="live-status-graphic">
+                    <svg viewBox="0 0 400 320" width="100%" height="auto">
+                        <defs>
+                            <style>
+                                .base-line {
+                                    stroke: rgba(255, 255, 255, 0.2);
+                                    stroke-width: 6;
+                                    stroke-linecap: round;
+                                }
+
+                                .flow-line {
+                                    fill: none;
+                                    stroke: rgba(255, 255, 255, 0.9);
+                                    stroke-width: 6;
+                                    stroke-linecap: round;
+                                    stroke-dasharray: 10 20;
+                                    opacity: 0;
+                                }
+
+                                .flow-active {
+                                    opacity: 1;
+                                }
+
+                                .flow-forward {
+                                    animation: flow-fwd 1s linear infinite;
+                                }
+
+                                .flow-backward {
+                                    animation: flow-bwd 1s linear infinite;
+                                }
+
+                                @keyframes flow-fwd {
+                                    from {
+                                        stroke-dashoffset: 30;
+                                    }
+
+                                    to {
+                                        stroke-dashoffset: 0;
+                                    }
+                                }
+
+                                @keyframes flow-bwd {
+                                    from {
+                                        stroke-dashoffset: 0;
+                                    }
+
+                                    to {
+                                        stroke-dashoffset: 30;
+                                    }
+                                }
+
+                                .icon-text {
+                                    font-family: 'Inter', sans-serif;
+                                    font-size: 16px;
+                                    font-weight: 600;
+                                }
+
+                                .text-cyan {
+                                    fill: var(--accent-cyan);
+                                }
+
+                                .text-yellow {
+                                    fill: var(--accent-yellow);
+                                }
+
+                                .text-green {
+                                    fill: var(--accent-green);
+                                }
+
+                                .text-red {
+                                    fill: var(--accent-red);
+                                }
+
+                                .text-blue {
+                                    fill: var(--accent-blue);
+                                }
+                            </style>
+                        </defs>
+
+                        <!-- Base connection lines -->
+                        <path class="base-line" d="M 200 80 L 200 130" /> <!-- PV -->
+                        <path class="base-line" d="M 330 160 L 230 160" /> <!-- Grid -->
+                        <path class="base-line" d="M 200 190 L 200 240" /> <!-- Home -->
+                        <path class="base-line" d="M 170 160 L 70 160" /> <!-- Battery -->
+
+                        <!-- Flow lines -->
+                        <path id="flow-pv" class="flow-line" d="M 200 80 L 200 130" />
+                        <path id="flow-grid" class="flow-line" d="M 330 160 L 230 160" />
+                        <path id="flow-home" class="flow-line" d="M 200 190 L 200 240" />
+                        <path id="flow-batt" class="flow-line" d="M 170 160 L 70 160" />
+
+                        <!-- Inverter (Center) -->
+                        <rect x="170" y="130" width="60" height="60" rx="8" stroke="white" stroke-width="2"
+                            fill="var(--bg-color)" />
+                        <line x1="175" y1="185" x2="225" y2="135" stroke="white" stroke-width="2" />
+                        <line x1="180" y1="145" x2="195" y2="145" stroke="white" stroke-width="2" />
+                        <line x1="180" y1="155" x2="195" y2="155" stroke="white" stroke-width="2" />
+                        <path d="M 200 175 Q 205 162 210 175 T 220 175" stroke="white" fill="none" stroke-width="2" />
+
+                        <!-- PV (Top) -->
+                        <g transform="translate(180, 20)">
+                            <circle cx="20" cy="15" r="8" fill="var(--accent-yellow)" />
+                            <path
+                                d="M 20 2 L 20 5 M 20 25 L 20 28 M 7 15 L 10 15 M 30 15 L 33 15 M 10 6 L 12 8 M 28 22 L 30 24 M 10 24 L 12 22 M 28 6 L 30 8"
+                                stroke="var(--accent-yellow)" stroke-width="2" stroke-linecap="round" />
+                            <!-- Solar panel -->
+                            <path d="M 6 45 L 34 45 L 30 35 L 10 35 Z" fill="var(--accent-yellow)" />
+                            <path d="M 14 35 L 12 45 M 20 35 L 20 45 M 26 35 L 28 45 M 6 40 L 34 40"
+                                stroke="var(--bg-color)" stroke-width="1.5" />
+                        </g>
+                        <text id="text-pv" x="235" y="45" class="icon-text text-yellow">-- kW</text>
+                        <text id="text-exp-pv" x="235" y="65" class="icon-text text-yellow"
+                            style="opacity: 0.8; font-size: 12px;">-- kWh (exp)</text>
+
+                        <!-- Home (Bottom) -->
+                        <g transform="translate(175, 240)">
+                            <polygon points="25,5 50,25 0,25" fill="var(--accent-green)" />
+                            <rect x="5" y="25" width="40" height="30" fill="var(--accent-green)" />
+                            <rect x="12" y="32" width="10" height="10" fill="var(--bg-color)" />
+                            <rect x="28" y="35" width="10" height="20" fill="var(--bg-color)" />
+                        </g>
+                        <text id="text-home" x="240" y="275" class="icon-text text-green">-- kW</text>
+
+                        <!-- Grid (Right) -->
+                        <g transform="translate(330, 115)">
+                            <path
+                                d="M 25 10 L 10 70 M 25 10 L 40 70 M 15 55 L 35 55 M 18 40 L 32 40 M 5 25 L 45 25 M 10 40 L 40 40"
+                                stroke="var(--accent-red)" stroke-width="2" fill="none" />
+                            <path
+                                d="M 13 25 L 32 40 M 37 25 L 18 40 M 15 40 L 35 55 M 35 40 L 15 55 M 10 55 L 35 70 M 40 55 L 15 70"
+                                stroke="var(--accent-red)" stroke-width="1" fill="none" />
+                        </g>
+                        <text id="text-grid" x="250" y="185" class="icon-text text-red">-- kW</text>
+
+                        <!-- Battery (Left) -->
+                        <g transform="translate(0, 110)">
+                            <rect x="30" y="0" width="10" height="5" fill="var(--accent-blue)" />
+                            <rect x="10" y="5" width="50" height="95" rx="4" stroke="var(--accent-blue)"
+                                stroke-width="3" fill="none" />
+                            <rect id="batt-fill" x="13" y="10" width="44" height="87" rx="2"
+                                fill="var(--accent-blue)" />
+                            <text id="text-soc" x="35" y="58" class="icon-text" fill="white" font-size="14px"
+                                text-anchor="middle" style="text-shadow: 1px 1px 2px black;">-- %</text>
+                        </g>
+                        <text id="text-batt" x="80" y="185" class="icon-text text-blue">-- kW</text>
+                    </svg>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2 class="panel-title">
+                    Alarm System
+                    <span id="alarm-status-badge" class="status-badge status-unknown">Connecting...</span>
+                </h2>
+                
+                <div class="keypad-container">
+                    <div id="password-display" class="password-display"></div>
+                    
+                    <div class="keys-grid">
+                        <button class="key-btn" onclick="pressKey('1')">1</button>
+                        <button class="key-btn" onclick="pressKey('2')">2</button>
+                        <button class="key-btn" onclick="pressKey('3')">3</button>
+                        
+                        <button class="key-btn" onclick="pressKey('4')">4</button>
+                        <button class="key-btn" onclick="pressKey('5')">5</button>
+                        <button class="key-btn" onclick="pressKey('6')">6</button>
+                        
+                        <button class="key-btn" onclick="pressKey('7')">7</button>
+                        <button class="key-btn" onclick="pressKey('8')">8</button>
+                        <button class="key-btn" onclick="pressKey('9')">9</button>
+                        
+                        <button class="key-btn key-action key-clear" onclick="clearCode()">Clear</button>
+                        <button class="key-btn" onclick="pressKey('0')">0</button>
+                        <button class="key-btn key-action key-enter" onclick="submitCode()">Enter</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // System Status Logic from index.html
+        function updateDOM(state) {
+            document.getElementById('last-updated').innerText = `Last updated: ${new Date().toLocaleTimeString()}`;
+
+            let soc = state.system_status.soc;
+            document.getElementById('text-soc').textContent = `${soc}%`;
+            let battHeight = Math.max(0, 87 * (soc / 100));
+            let battY = 97 - battHeight;
+            let battFill = document.getElementById('batt-fill');
+            if (battFill) {
+                battFill.setAttribute('y', battY);
+                battFill.setAttribute('height', battHeight);
+            }
+
+            let pvKw = state.system_status.pv_power;
+            document.getElementById('text-pv').textContent = `${pvKw.toFixed(1)} kW`;
+            document.getElementById('text-exp-pv').textContent = `${state.expected_pv_kwh.toFixed(1)} kWh (exp)`;
+
+            let loadKw = state.system_status.load_power;
+            document.getElementById('text-home').textContent = `${loadKw.toFixed(1)} kW`;
+
+            let gridKw = state.system_status.grid_power;
+            document.getElementById('text-grid').textContent = `${gridKw.toFixed(1)} kW`;
+
+            let battKw = state.system_status.battery_power;
+            document.getElementById('text-batt').textContent = `${battKw.toFixed(1)} kW`;
+
+            function updateFlowConfig(id, power) {
+                let el = document.getElementById(id);
+                if (!el) return;
+                if (Math.abs(power) < 0.05) {
+                    el.className.baseVal = 'flow-line';
+                } else {
+                    let speed = Math.max(0.2, 1.5 - Math.abs(power) * 0.15);
+                    el.style.animationDuration = `${speed}s`;
+                    if (power > 0) {
+                        el.className.baseVal = 'flow-line flow-active flow-forward';
+                    } else {
+                        el.className.baseVal = 'flow-line flow-active flow-backward';
+                    }
+                }
+            }
+
+            updateFlowConfig('flow-pv', pvKw);
+            updateFlowConfig('flow-grid', gridKw);
+            updateFlowConfig('flow-home', loadKw);
+            updateFlowConfig('flow-batt', battKw);
+
+            // Hide loading
+            document.getElementById('loading').classList.add('hidden');
+        }
+
+        async function fetchState() {
+            try {
+                const res = await fetch('{{APP_CONTEXT_PATH}}/api/state');
+                const state = await res.json();
+                if (state) {
+                    updateDOM(state);
+                }
+            } catch (err) {
+                console.error("Failed to fetch state:", err);
+            }
+        }
+
+        // Alarm Keypad Logic
+        let currentPin = "";
+        
+        function updateDisplay() {
+            document.getElementById('password-display').innerText = '*'.repeat(currentPin.length);
+        }
+
+        function pressKey(char) {
+            if (currentPin.length < 10) { // Limit pin length just in case
+                currentPin += char;
+                updateDisplay();
+            }
+        }
+
+        function clearCode() {
+            currentPin = "";
+            updateDisplay();
+        }
+
+        async function submitCode() {
+            if (currentPin.length === 0) return;
+            
+            try {
+                // Send GET request to alarm system
+                console.log("Submitting PIN code...");
+                await fetch("{{APP_CONTEXT_PATH}}/api/alarm/code/" + currentPin);
+            } catch (err) {
+                console.error("Failed to send code:", err);
+            } finally {
+                // Clear pin after submission
+                clearCode();
+                // Trigger an immediate update of the status
+                setTimeout(fetchAlarmStatus, 500); 
+            }
+        }
+
+        async function fetchAlarmStatus() {
+            try {
+                const res = await fetch("{{APP_CONTEXT_PATH}}/api/alarm/status");
+                if (res.ok) {
+                    const text = (await res.text()).trim().toLowerCase();
+                    updateAlarmBadge(text);
+                } else {
+                    console.error("Failed to fetch alarm status, HTTP code:", res.status);
+                    updateAlarmBadge('unknown');
+                }
+            } catch (err) {
+                console.error("Failed to fetch alarm status:", err);
+                updateAlarmBadge('unknown');
+            }
+        }
+
+        function updateAlarmBadge(status) {
+            const badge = document.getElementById('alarm-status-badge');
+            
+            // Remove previous classes
+            badge.className = 'status-badge';
+            
+            if (status === 'armed_away' || status === 'armed_home' || status === 'armed') {
+                badge.classList.add('status-armed');
+                badge.innerText = 'Armed';
+            } else if (status === 'disarmed') {
+                badge.classList.add('status-disarmed');
+                badge.innerText = 'Disarmed';
+            } else if (status === 'alarm') {
+                badge.classList.add('status-alarm');
+                badge.innerText = 'Alarm!';
+            } else {
+                badge.classList.add('status-unknown');
+                badge.innerText = status ? status.toUpperCase() : 'Unknown';
+            }
+        }
+
+        window.onload = () => {
+            fetchState();
+            fetchAlarmStatus();
+            
+            // Poll for local system status
+            setInterval(fetchState, 60000); 
+            
+            // Poll for alarm system status
+            setInterval(fetchAlarmStatus, 10000); // Every 10 seconds
+        };
+    </script>
+</body>
+
+</html>
