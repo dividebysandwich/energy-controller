@@ -1,6 +1,6 @@
 # Energy Controller
 
-<img width="1212" height="906" alt="image" src="https://github.com/user-attachments/assets/0b21b8ef-793f-4aaf-b53a-37223c1c2afc" />
+<img width="1211" height="902" alt="image" src="https://github.com/user-attachments/assets/f27b3f1c-4f7f-4b2c-aa4c-862a58dafb39" />
 
 <img width="1234" height="711" alt="image_2026-03-04_16-37-53" src="https://github.com/user-attachments/assets/84413be6-ed54-4a9e-a232-ebd0a3f14ff3" />
 
