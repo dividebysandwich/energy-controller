@@ -31,24 +31,20 @@
             margin: 0;
             padding: 20px;
             box-sizing: border-box;
-            min-height: 100vh;
+            height: 100vh; /* Lock height to viewport */
+            width: 100vw;
+            overflow: hidden; /* Prevent scrolling entirely */
             background-image: radial-gradient(circle at top right, #1e1b4b, #0f172a);
             touch-action: manipulation;
         }
 
         .container {
             max-width: 1000px;
+            height: 100%; /* Fill body height */
             margin: 0 auto;
             display: flex;
             flex-direction: column;
             gap: 20px;
-        }
-
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 10px;
         }
 
         h1 {
@@ -61,11 +57,6 @@
             -webkit-text-fill-color: transparent;
         }
 
-        #last-updated {
-            font-size: 0.875rem;
-            color: var(--text-muted);
-        }
-
         .card {
             background: var(--card-bg);
             border: 1px solid rgba(255, 255, 255, 0.1);
@@ -74,6 +65,10 @@
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
             backdrop-filter: blur(12px);
             transition: transform 0.2s ease;
+            flex: 1; /* Allow cards to stretch */
+            display: flex;
+            flex-direction: column;
+            min-height: 0; /* Ensures flex children scale properly */
         }
 
         .card:hover {
@@ -82,9 +77,18 @@
         }
 
         .grid-panels {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            display: flex;
+            flex-direction: row;
             gap: 20px;
+            flex: 1;
+            min-height: 0;
+        }
+
+        /* Stack vertically on screens taller than they are wide (e.g. mobile) */
+        @media (max-aspect-ratio: 1/1) {
+            .grid-panels {
+                flex-direction: column;
+            }
         }
 
         .panel-title {
@@ -98,6 +102,22 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-shrink: 0;
+        }
+
+        .live-status-graphic {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 0;
+        }
+
+        .live-status-graphic svg {
+            width: 100%;
+            height: 100%;
+            max-height: 100%;
+            object-fit: contain; /* Prevents SVG from expanding bounds */
         }
 
         .loading-overlay {
@@ -139,8 +159,11 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            gap: 24px;
-            margin-top: 20px;
+            gap: 2vh;
+            margin-top: 0;
+            flex: 1;
+            min-height: 0;
+            justify-content: center;
         }
 
         .password-display {
@@ -157,14 +180,17 @@
             color: var(--text-main);
             font-family: monospace;
             box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+            flex-shrink: 0;
         }
 
         .keys-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
-            gap: 16px;
+            gap: 12px;
             width: 100%;
             max-width: 340px;
+            flex: 1;
+            min-height: 0;
         }
 
         .key-btn {
@@ -174,7 +200,11 @@
             color: var(--text-main);
             font-size: 2rem;
             font-weight: 500;
-            padding: 20px 0;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
             cursor: pointer;
             transition: all 0.1s ease;
             user-select: none;
@@ -262,16 +292,15 @@
     </div>
 
     <div class="container">
-        <header>
-            <div id="last-updated">Waiting for data...</div>
-        </header>
-
         <div class="grid-panels">
             <div class="card">
                 <h2 class="panel-title">Live System Status</h2>
                 <div class="live-status-graphic">
                     <svg viewBox="0 0 400 320" width="100%" height="auto">
                         <defs>
+                            <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="6" refY="3" orient="auto">
+                                <polygon points="0 0, 8 3, 0 6" fill="rgba(255, 255, 255, 0.9)" />
+                            </marker>
                             <style>
                                 .base-line {
                                     stroke: rgba(255, 255, 255, 0.2);
@@ -279,45 +308,14 @@
                                     stroke-linecap: round;
                                 }
 
-                                .flow-line {
+                                .flow-arrow {
                                     fill: none;
                                     stroke: rgba(255, 255, 255, 0.9);
-                                    stroke-width: 6;
+                                    stroke-width: 4;
                                     stroke-linecap: round;
-                                    stroke-dasharray: 10 20;
                                     opacity: 0;
-                                }
-
-                                .flow-active {
-                                    opacity: 1;
-                                }
-
-                                .flow-forward {
-                                    animation: flow-fwd 1s linear infinite;
-                                }
-
-                                .flow-backward {
-                                    animation: flow-bwd 1s linear infinite;
-                                }
-
-                                @keyframes flow-fwd {
-                                    from {
-                                        stroke-dashoffset: 30;
-                                    }
-
-                                    to {
-                                        stroke-dashoffset: 0;
-                                    }
-                                }
-
-                                @keyframes flow-bwd {
-                                    from {
-                                        stroke-dashoffset: 0;
-                                    }
-
-                                    to {
-                                        stroke-dashoffset: 30;
-                                    }
+                                    transition: opacity 0.3s ease;
+                                    marker-end: url(#arrowhead);
                                 }
 
                                 .icon-text {
@@ -348,19 +346,11 @@
                             </style>
                         </defs>
 
-                        <!-- Base connection lines -->
-                        <path class="base-line" d="M 200 80 L 200 130" /> <!-- PV -->
-                        <path class="base-line" d="M 330 160 L 230 160" /> <!-- Grid -->
-                        <path class="base-line" d="M 200 190 L 200 240" /> <!-- Home -->
-                        <path class="base-line" d="M 170 160 L 70 160" /> <!-- Battery -->
+                        <path class="base-line" d="M 200 80 L 200 130" /> <path class="base-line" d="M 330 160 L 230 160" /> <path class="base-line" d="M 200 190 L 200 240" /> <path class="base-line" d="M 170 160 L 70 160" /> <path id="flow-pv" class="flow-arrow" data-x1="200" data-y1="90" data-x2="200" data-y2="120" d="M 200 90 L 200 120" />
+                        <path id="flow-grid" class="flow-arrow" data-x1="320" data-y1="160" data-x2="240" data-y2="160" d="M 320 160 L 240 160" />
+                        <path id="flow-home" class="flow-arrow" data-x1="200" data-y1="200" data-x2="200" data-y2="230" d="M 200 200 L 200 230" />
+                        <path id="flow-batt" class="flow-arrow" data-x1="160" data-y1="160" data-x2="80" data-y2="160" d="M 160 160 L 80 160" />
 
-                        <!-- Flow lines -->
-                        <path id="flow-pv" class="flow-line" d="M 200 80 L 200 130" />
-                        <path id="flow-grid" class="flow-line" d="M 330 160 L 230 160" />
-                        <path id="flow-home" class="flow-line" d="M 200 190 L 200 240" />
-                        <path id="flow-batt" class="flow-line" d="M 170 160 L 70 160" />
-
-                        <!-- Inverter (Center) -->
                         <rect x="170" y="130" width="60" height="60" rx="8" stroke="white" stroke-width="2"
                             fill="var(--bg-color)" />
                         <line x1="175" y1="185" x2="225" y2="135" stroke="white" stroke-width="2" />
@@ -368,13 +358,11 @@
                         <line x1="180" y1="155" x2="195" y2="155" stroke="white" stroke-width="2" />
                         <path d="M 200 175 Q 205 162 210 175 T 220 175" stroke="white" fill="none" stroke-width="2" />
 
-                        <!-- PV (Top) -->
                         <g transform="translate(180, 20)">
                             <circle cx="20" cy="15" r="8" fill="var(--accent-yellow)" />
                             <path
                                 d="M 20 2 L 20 5 M 20 25 L 20 28 M 7 15 L 10 15 M 30 15 L 33 15 M 10 6 L 12 8 M 28 22 L 30 24 M 10 24 L 12 22 M 28 6 L 30 8"
                                 stroke="var(--accent-yellow)" stroke-width="2" stroke-linecap="round" />
-                            <!-- Solar panel -->
                             <path d="M 6 45 L 34 45 L 30 35 L 10 35 Z" fill="var(--accent-yellow)" />
                             <path d="M 14 35 L 12 45 M 20 35 L 20 45 M 26 35 L 28 45 M 6 40 L 34 40"
                                 stroke="var(--bg-color)" stroke-width="1.5" />
@@ -383,7 +371,6 @@
                         <text id="text-exp-pv" x="235" y="65" class="icon-text text-yellow"
                             style="opacity: 0.8; font-size: 12px;">-- kWh (exp)</text>
 
-                        <!-- Home (Bottom) -->
                         <g transform="translate(175, 240)">
                             <polygon points="25,5 50,25 0,25" fill="var(--accent-green)" />
                             <rect x="5" y="25" width="40" height="30" fill="var(--accent-green)" />
@@ -392,7 +379,6 @@
                         </g>
                         <text id="text-home" x="240" y="275" class="icon-text text-green">-- kW</text>
 
-                        <!-- Grid (Right) -->
                         <g transform="translate(330, 115)">
                             <path
                                 d="M 25 10 L 10 70 M 25 10 L 40 70 M 15 55 L 35 55 M 18 40 L 32 40 M 5 25 L 45 25 M 10 40 L 40 40"
@@ -403,7 +389,6 @@
                         </g>
                         <text id="text-grid" x="250" y="185" class="icon-text text-red">-- kW</text>
 
-                        <!-- Battery (Left) -->
                         <g transform="translate(0, 110)">
                             <rect x="30" y="0" width="10" height="5" fill="var(--accent-blue)" />
                             <rect x="10" y="5" width="50" height="95" rx="4" stroke="var(--accent-blue)"
@@ -450,10 +435,8 @@
     </div>
 
     <script>
-        // System Status Logic from index.html
+        // System Status Logic
         function updateDOM(state) {
-            document.getElementById('last-updated').innerText = `Last updated: ${new Date().toLocaleTimeString()}`;
-
             let soc = state.system_status.soc;
             document.getElementById('text-soc').textContent = `${soc}%`;
             let battHeight = Math.max(0, 87 * (soc / 100));
@@ -480,15 +463,23 @@
             function updateFlowConfig(id, power) {
                 let el = document.getElementById(id);
                 if (!el) return;
+                
                 if (Math.abs(power) < 0.05) {
-                    el.className.baseVal = 'flow-line';
+                    el.style.opacity = '0';
                 } else {
-                    let speed = Math.max(0.2, 1.5 - Math.abs(power) * 0.15);
-                    el.style.animationDuration = `${speed}s`;
+                    el.style.opacity = '1';
+                    
+                    // Fetch configured direction coordinates
+                    let x1 = el.getAttribute('data-x1');
+                    let y1 = el.getAttribute('data-y1');
+                    let x2 = el.getAttribute('data-x2');
+                    let y2 = el.getAttribute('data-y2');
+                    
+                    // Flip the path direction entirely if power flow reverses
                     if (power > 0) {
-                        el.className.baseVal = 'flow-line flow-active flow-forward';
+                        el.setAttribute('d', `M ${x1} ${y1} L ${x2} ${y2}`);
                     } else {
-                        el.className.baseVal = 'flow-line flow-active flow-backward';
+                        el.setAttribute('d', `M ${x2} ${y2} L ${x1} ${y1}`);
                     }
                 }
             }
@@ -522,7 +513,7 @@
         }
 
         function pressKey(char) {
-            if (currentPin.length < 10) { // Limit pin length just in case
+            if (currentPin.length < 10) {
                 currentPin += char;
                 updateDisplay();
             }
