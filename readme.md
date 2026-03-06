@@ -1,9 +1,8 @@
 # Energy Controller
 
+<img width="1212" height="906" alt="image" src="https://github.com/user-attachments/assets/0b21b8ef-793f-4aaf-b53a-37223c1c2afc" />
+
 <img width="1234" height="711" alt="image_2026-03-04_16-37-53" src="https://github.com/user-attachments/assets/84413be6-ed54-4a9e-a232-ebd0a3f14ff3" />
-
-<img width="1211" height="805" alt="image" src="https://github.com/user-attachments/assets/86e1689c-12ba-4501-89b7-996cfa9a5f61" />
-
 
 This program controls the battery charge level of a Victron energy storage system to optimize grid energy usage, buying energy from the grid on price dips and preserving battery capacity for use during price spikes. The pricing info is fetched from EPEX / Spotty.
 
