@@ -481,30 +481,33 @@
 
         function updateChart(state) {
             const now = new Date();
+            const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+
+            if (chart && chart.options.scales.x) {
+                chart.options.scales.x.min = twelveHoursAgo;
+            }
 
             // Filter prices to similar range as TUI (today and tomorrow)
             // Just graph all of them for simplicity, TUI filtered today/tmr.
-            const priceData = state.prices.map(p => ({ x: new Date(p.from), y: p.price }));
+            const priceData = state.prices
+                .map(p => ({ x: new Date(p.from), y: p.price }))
+                .filter(d => d.x >= twelveHoursAgo);
 
             // To scale PV and Heating, we need finding min/max price
-            let minP = Math.min(...priceData.map(d => d.y));
-            let maxP = Math.max(...priceData.map(d => d.y));
+            let minP = Math.min(...(priceData.length ? priceData : [{y: 0}]).map(d => d.y));
+            let maxP = Math.max(...(priceData.length ? priceData : [{y: 10}]).map(d => d.y));
             let yRange = maxP - minP;
             if (yRange === 0) yRange = 10;
 
             let yMin = minP * 0.95;
 
-            const pvData = state.hourly_pv_kw.map(d => {
-                let ts = d[0] * 1000;
-                let kw = d[1];
-                return { x: new Date(ts), y: kw };
-            });
+            const pvData = state.hourly_pv_kw
+                .map(d => ({ x: new Date(d[0] * 1000), y: d[1] }))
+                .filter(d => d.x >= twelveHoursAgo);
 
-            const heatingData = state.hourly_heating_kw.map(d => {
-                let ts = d[0] * 1000;
-                let kw = d[1];
-                return { x: new Date(ts), y: kw };
-            });
+            const heatingData = state.hourly_heating_kw
+                .map(d => ({ x: new Date(d[0] * 1000), y: d[1] }))
+                .filter(d => d.x >= twelveHoursAgo);
 
             function mapHistogramFromWatts(histogram) {
                 if (!histogram) return [];
@@ -512,7 +515,7 @@
                     const t = new Date(point[0]);
                     const kw = point[1]; // Value is already in kW
                     return { x: t, y: kw };
-                });
+                }).filter(d => d.x >= twelveHoursAgo);
             }
 
             const actualPvData = mapHistogramFromWatts(state.system_status.pv_histogram);
