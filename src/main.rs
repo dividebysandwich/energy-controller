@@ -178,6 +178,7 @@ fn main() -> Result<()> {
         let mut block_start_time: Option<DateTime<Utc>> = None;
         let mut rest_until_time: Option<DateTime<Utc>> = None;
         let mut weather_cache: Option<WeatherCache> = None;
+        let mut last_price_fetch: Option<DateTime<Utc>> = None;
 
         if let Err(e) = control_relay(&config, CompressorState::Allowed, &client) {
             let _ = tx.send(Some(AppState::new_with_status(format!(
@@ -204,6 +205,16 @@ fn main() -> Result<()> {
                     }
                     Err(e) => log::error!("Failed to fetch weather: {}", e),
                 }
+            }
+
+            // Fetch price every hour
+            let needs_price_update = last_price_fetch.map_or(true, |t| {
+                now.signed_duration_since(t).num_hours() >= 1
+            });
+
+            if needs_price_update {
+                prices.clear();
+                last_price_fetch = Some(now);
             }
 
             // Fallback empty weather if API fails on startup
