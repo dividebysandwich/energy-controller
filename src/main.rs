@@ -830,6 +830,7 @@ fn calculate_required_soc(
 
     while current < end_time {
         let mut temp_c = 0.0; // Failsafe to 0C if missing
+        let mut radiation = 0.0;
 
         // Open-Meteo time format is "YYYY-MM-DDTHH:00"
         let current_local = current
@@ -844,6 +845,13 @@ fn calculate_required_soc(
                 .get(idx)
                 .copied()
                 .unwrap_or(0.0);
+            
+            radiation = weather
+                .hourly
+                .shortwave_radiation
+                .get(idx)
+                .copied()
+                .unwrap_or(0.0);
         }
 
         // Add baseline house load
@@ -855,8 +863,17 @@ fn calculate_required_soc(
             total_kwh += config.heating_kwh_per_h_at_0c * temp_factor;
         }
 
+        // Subtract expected PV production
+        // Panels are rated at 1000 W/m².
+        // 0.85 accounts for standard real-world system/inverter losses.
+        let expected_pv_kw = config.pv_size_kwp * (radiation / 1000.0) * 0.85;
+        total_kwh -= expected_pv_kw;
+
         current += Duration::hours(1);
     }
+
+    // Ensure total_kwh doesn't drop below 0 (we can't give energy back from the calculation like this)
+    total_kwh = f64::max(0.0, total_kwh);
 
     // Convert required kWh into a percentage of your battery size
     let required_soc_percent = (total_kwh / config.battery_size_kwh) * 100.0;
@@ -1006,8 +1023,6 @@ fn run_price_analysis(
         }
 
         // PV Forecast Overrides
-        let is_winter = matches!(now.month(), 10..=12 | 1..=3);
-
         let missing_soc_percent = 100.0 - (current_status.soc as f64);
         let missing_kwh = config.battery_size_kwh * (missing_soc_percent / 100.0);
 
@@ -1038,33 +1053,33 @@ fn run_price_analysis(
             }
         }
 
-        if !is_winter {
-            // In Summer/Spring/Autumn, favor PV.
-            if expected_pv_kwh >= missing_kwh {
-                // The sun will fill the battery. Cancel grid ForceCharge unless prices are basically zero.
-                if let BatteryDecision::ForceCharge(_, reason) = &battery_decision {
-                    let reason_clone = reason.clone();
-                    if current_price_info.price > 1.0 {
-                        battery_decision = BatteryDecision::Baseline(baseline_soc);
-                        log::info!(
-                            "Canceled ForceCharge ({}). PV yield expected: {:.2}kWh, missing: {:.2}kWh",
-                            reason_clone,
-                            expected_pv_kwh,
-                            missing_kwh
-                        );
-                    }
+        // Favor PV independent of season.
+        if expected_pv_kwh >= missing_kwh {
+            // The sun will fill the battery. Cancel grid ForceCharge unless prices are basically zero.
+            if let BatteryDecision::ForceCharge(_, reason) = &battery_decision {
+                let reason_clone = reason.clone();
+                if current_price_info.price > 1.0 {
+                    battery_decision = BatteryDecision::Baseline(baseline_soc);
+                    log::info!(
+                        "Canceled ForceCharge ({}). PV yield expected: {:.2}kWh, missing: {:.2}kWh",
+                        reason_clone,
+                        expected_pv_kwh,
+                        missing_kwh
+                    );
                 }
             }
         } else {
-            // In Winter, favor the grid.
             // If expected PV is terrible and price is somewhat low, aggressively force charge.
-            if expected_pv_kwh < (missing_kwh * 0.3)
-                && current_price_info.price < low_price_threshold
-            {
-                battery_decision = BatteryDecision::ForceCharge(
-                    force_charge_soc,
-                    "Winter Low PV Grid Charge".to_string(),
-                );
+            let is_winter = matches!(now.month(), 10..=12 | 1..=3);
+            if is_winter {
+                if expected_pv_kwh < (missing_kwh * 0.3)
+                    && current_price_info.price < low_price_threshold
+                {
+                    battery_decision = BatteryDecision::ForceCharge(
+                        force_charge_soc,
+                        "Winter Low PV Grid Charge".to_string(),
+                    );
+                }
             }
         }
 
