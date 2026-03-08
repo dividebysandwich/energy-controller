@@ -433,7 +433,8 @@
                                 unit: 'hour',
                                 displayFormats: { hour: 'HH:mm' }
                             },
-                            grid: { color: 'rgba(255, 255, 255, 0.05)' }
+                            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                            ticks: { maxTicksLimit: 12 }
                         },
                         y: {
                             type: 'linear',
@@ -447,11 +448,30 @@
                             display: true,
                             position: 'right',
                             title: { display: true, text: 'Power (kW)' },
-                            grid: { drawOnChartArea: false } // Only draw grid for one axis
+                            grid: { drawOnChartArea: false },
+                            beginAtZero: true, // Prevents the axis from floating
+                            ticks: {
+                                sync: false    // Forces y1 to ignore y2's scaling
+                            }
+                        },
+                        y2: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: { display: true, text: 'SOC (%)' },
+                            grid: { drawOnChartArea: false },
+                            min: 0,
+                            max: 100
                         }
                     },
                     plugins: {
-                        legend: { position: 'top' },
+                        legend: { 
+                            position: 'top',
+                            labels: {
+                                boxWidth: 40,     
+                                font: { size: 12 } 
+                            }
+                        },
                         tooltip: {
                             backgroundColor: 'rgba(15, 23, 42, 0.9)',
                             titleColor: '#fff',
@@ -481,46 +501,62 @@
 
         function updateChart(state) {
             const now = new Date();
-            const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+            const isMobile = window.innerWidth < 768; // Detect narrow screens
+            
+            // Set dynamic time windows
+            const hoursPast = isMobile ? 1 : 12;
+            const startTime = new Date(now.getTime() - hoursPast * 60 * 60 * 1000);
+            const endTime = isMobile ? new Date(now.getTime() + 6 * 60 * 60 * 1000) : null;
 
             if (chart && chart.options.scales.x) {
-                chart.options.scales.x.min = twelveHoursAgo;
+                // Apply dynamic time limits
+                chart.options.scales.x.min = startTime;
+                if (endTime) {
+                    chart.options.scales.x.max = endTime;
+                } else {
+                    delete chart.options.scales.x.max;
+                }
+
+                // SAFELY update primitive values only (no circular references!)
+                chart.options.scales.x.ticks.maxTicksLimit = isMobile ? 5 : 12;
+                chart.options.plugins.legend.position = isMobile ? 'bottom' : 'top';
+                chart.options.plugins.legend.labels.boxWidth = isMobile ? 12 : 40;
+                chart.options.plugins.legend.labels.font.size = isMobile ? 10 : 12;
             }
 
-            // Filter prices to similar range as TUI (today and tomorrow)
-            // Just graph all of them for simplicity, TUI filtered today/tmr.
+            // Filter data using the new dynamic 'startTime'
             const priceData = state.prices
                 .map(p => ({ x: new Date(p.from), y: p.price }))
-                .filter(d => d.x >= twelveHoursAgo);
+                .filter(d => d.x >= startTime);
 
             // To scale PV and Heating, we need finding min/max price
             let minP = Math.min(...(priceData.length ? priceData : [{y: 0}]).map(d => d.y));
             let maxP = Math.max(...(priceData.length ? priceData : [{y: 10}]).map(d => d.y));
             let yRange = maxP - minP;
             if (yRange === 0) yRange = 10;
-
             let yMin = minP * 0.95;
 
             const pvData = state.hourly_pv_kw
                 .map(d => ({ x: new Date(d[0] * 1000), y: d[1] }))
-                .filter(d => d.x >= twelveHoursAgo);
+                .filter(d => d.x >= startTime);
 
             const heatingData = state.hourly_heating_kw
                 .map(d => ({ x: new Date(d[0] * 1000), y: d[1] }))
-                .filter(d => d.x >= twelveHoursAgo);
-
+                .filter(d => d.x >= startTime);
+        
             function mapHistogramFromWatts(histogram) {
                 if (!histogram) return [];
                 return histogram.map((point) => {
                     const t = new Date(point[0]);
-                    const kw = point[1]; // Value is already in kW
+                    const kw = point[1]; 
                     return { x: t, y: kw };
-                }).filter(d => d.x >= twelveHoursAgo);
+                }).filter(d => d.x >= startTime);
             }
 
             const actualPvData = mapHistogramFromWatts(state.system_status.pv_histogram);
             const actualHomeData = mapHistogramFromWatts(state.system_status.load_histogram);
             const actualGridData = mapHistogramFromWatts(state.system_status.grid_histogram);
+            const actualSocData = mapHistogramFromWatts(state.system_status.soc_histogram);
 
             if (chart.data.datasets.length === 0) {
                 chart.data.datasets = [
@@ -579,6 +615,16 @@
                         borderDash: [5, 5],
                         tension: 0.4,
                         yAxisID: 'y1'
+                    },
+                    {
+                        label: 'Battery SOC',
+                        data: actualSocData,
+                        borderColor: 'rgba(59, 130, 246, 1)',
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.4,
+                        fill: false,
+                        yAxisID: 'y2'
                     }
                 ];
             } else {
@@ -588,6 +634,7 @@
                 chart.data.datasets[3].data = actualHomeData;
                 chart.data.datasets[4].data = actualGridData;
                 chart.data.datasets[5].data = heatingData;
+                chart.data.datasets[6].data = actualSocData;
             }
 
             // Annotations for Current Price Line and "Now" Line
@@ -690,11 +737,15 @@
             document.getElementById('loading').classList.add('hidden');
         }
 
+        let lastState = null; 
+        let currentlyMobile = window.innerWidth < 768; // Track the current layout mode
+
         async function fetchState() {
             try {
                 const res = await fetch('{{APP_CONTEXT_PATH}}/api/state');
                 const state = await res.json();
                 if (state) {
+                    lastState = state; // Save for window resizing
                     updateChart(state);
                     updateDOM(state);
                 }
@@ -708,6 +759,18 @@
             fetchState();
             setInterval(fetchState, 60000); // Every minute
         };
+
+        // Redraw chart ONLY if screen size crosses the mobile/desktop threshold
+        window.addEventListener('resize', () => {
+            if (!lastState) return;
+
+            const isNowMobile = window.innerWidth < 768;
+            
+            if (isNowMobile !== currentlyMobile) {
+                currentlyMobile = isNowMobile; // Update the tracker
+                updateChart(lastState);        // Redraw the chart
+            }
+        });
     </script>
 </body>
 
