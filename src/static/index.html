@@ -188,6 +188,33 @@
             opacity: 0;
             pointer-events: none;
         }
+        /* Mobile Layout Adjustments */
+        @media (max-width: 767px) {
+            body {
+                /* Keeps top/bottom padding, completely removes left/right padding */
+                padding: 15px 0; 
+            }
+
+            .card {
+                /* Shrinks internal padding from 20px to 10px */
+                padding: 10px; 
+                
+                /* Optional: Removes side borders and rounded corners so the cards sit flush against the phone screen */
+                border-radius: 0; 
+                border-left: none;
+                border-right: none;
+            }
+
+            header {
+                /* Since the body padding is gone, this keeps your header text from touching the physical edge of the phone glass */
+                padding: 0 15px; 
+            }
+
+            .container {
+                /* Closes the gap between stacked cards slightly */
+                gap: 12px; 
+            }
+        }
     </style>
 </head>
 
@@ -522,6 +549,7 @@
                 chart.options.plugins.legend.position = isMobile ? 'bottom' : 'top';
                 chart.options.plugins.legend.labels.boxWidth = isMobile ? 12 : 40;
                 chart.options.plugins.legend.labels.font.size = isMobile ? 10 : 12;
+                chart.options.scales.y2.display = !isMobile;
             }
 
             // Filter data using the new dynamic 'startTime'
@@ -624,7 +652,8 @@
                         borderWidth: 2,
                         tension: 0.4,
                         fill: false,
-                        yAxisID: 'y2'
+                        yAxisID: 'y2',
+                        hidden: isMobile
                     }
                 ];
             } else {
@@ -635,6 +664,7 @@
                 chart.data.datasets[4].data = actualGridData;
                 chart.data.datasets[5].data = heatingData;
                 chart.data.datasets[6].data = actualSocData;
+                chart.data.datasets[6].hidden = isMobile;
             }
 
             // Annotations for Current Price Line and "Now" Line
