@@ -953,8 +953,29 @@ fn run_price_analysis(
     };
 
     // Initial Battery Decision Logic
-    let baseline_soc = get_baseline_soc(config, now);
+    let mut baseline_soc = get_baseline_soc(config, now);
     let force_charge_soc = get_force_charge_soc(config, now);
+
+    // In winter, if next-day solar is predicted to produce at least 50% of battery capacity,
+    // allow discharging to the summer minimum instead of the more conservative winter minimum.
+    // This avoids arriving at the morning price peak with an unnecessarily full battery.
+    let is_winter_baseline = matches!(now.month(), 10..=12 | 1..=3);
+    if is_winter_baseline && baseline_soc > config.summer_min_soc {
+        let next_day_pv_kwh = calculate_next_day_pv_kwh(config, weather, now);
+        let fifty_percent_kwh = config.battery_size_kwh * 0.5;
+        if next_day_pv_kwh >= fifty_percent_kwh {
+            log::info!(
+                "Next-day PV forecast ({:.2}kWh) >= 50% battery capacity ({:.2}kWh). \
+                 Using summer min SOC ({}%) instead of winter min SOC ({}%).",
+                next_day_pv_kwh,
+                fifty_percent_kwh,
+                config.summer_min_soc,
+                baseline_soc
+            );
+            baseline_soc = config.summer_min_soc;
+        }
+    }
+
     let mut battery_decision = BatteryDecision::Baseline(baseline_soc);
 
     if config.enable_battery_control {
@@ -1130,6 +1151,31 @@ fn get_baseline_soc(config: &Config, now: DateTime<Utc>) -> u8 {
         4..=9 => config.summer_min_soc, // April to September is Summer
         _ => config.winter_min_soc,     // October to March is Winter
     }
+}
+
+/// Calculates the total expected PV production (kWh) for the next calendar day.
+fn calculate_next_day_pv_kwh(config: &Config, weather: &WeatherResponse, now: DateTime<Utc>) -> f64 {
+    let tomorrow = (now.with_timezone(&Tz::CET) + Duration::days(1)).date_naive();
+    let mut total_kwh = 0.0;
+
+    for (i, t_str) in weather.hourly.time.iter().enumerate() {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(t_str, "%Y-%m-%dT%H:%M") {
+            if let Some(ts) = ndt.and_local_timezone(Tz::CET).single() {
+                if ts.date_naive() == tomorrow {
+                    let radiation = weather
+                        .hourly
+                        .shortwave_radiation
+                        .get(i)
+                        .copied()
+                        .unwrap_or(0.0);
+                    let expected_kw = config.pv_size_kwp * (radiation / 1000.0) * 0.85;
+                    total_kwh += expected_kw;
+                }
+            }
+        }
+    }
+
+    total_kwh
 }
 fn get_force_charge_soc(config: &Config, now: DateTime<Utc>) -> u8 {
     match now.month() {
