@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
 use chrono_tz::Tz;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -957,22 +957,27 @@ fn run_price_analysis(
     let force_charge_soc = get_force_charge_soc(config, now);
 
     // In winter, if next-day solar is predicted to produce at least 50% of battery capacity,
-    // allow discharging to the summer minimum instead of the more conservative winter minimum.
-    // This avoids arriving at the morning price peak with an unnecessarily full battery.
+    // lower the discharge floor to the summer minimum (10%) during the morning price spike
+    // window (06:00–12:00). Outside that window the winter minimum (20%) is preserved so the
+    // extra capacity is held in reserve and only released at the start of the spike.
     let is_winter_baseline = matches!(now.month(), 10..=12 | 1..=3);
     if is_winter_baseline && baseline_soc > config.summer_min_soc {
         let next_day_pv_kwh = calculate_next_day_pv_kwh(config, weather, now);
         let fifty_percent_kwh = config.battery_size_kwh * 0.5;
         if next_day_pv_kwh >= fifty_percent_kwh {
-            log::info!(
-                "Next-day PV forecast ({:.2}kWh) >= 50% battery capacity ({:.2}kWh). \
-                 Using summer min SOC ({}%) instead of winter min SOC ({}%).",
-                next_day_pv_kwh,
-                fifty_percent_kwh,
-                config.summer_min_soc,
-                baseline_soc
-            );
-            baseline_soc = config.summer_min_soc;
+            let local_hour = now.with_timezone(&Tz::CET).hour();
+            if local_hour >= 6 && local_hour < 12 {
+                log::info!(
+                    "Morning spike window ({}h CET): next-day PV forecast ({:.2}kWh) >= 50% \
+                     battery capacity ({:.2}kWh). Lowering min SOC from {}% to {}% for discharge.",
+                    local_hour,
+                    next_day_pv_kwh,
+                    fifty_percent_kwh,
+                    baseline_soc,
+                    config.summer_min_soc
+                );
+                baseline_soc = config.summer_min_soc;
+            }
         }
     }
 
