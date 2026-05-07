@@ -56,6 +56,12 @@ Create a `.env` file in the same directory as the executable with the following 
     CHECK_INTERVAL_MINUTES=5
     ```
 
+- **Enable price-based control:**
+    ```env
+    USE_PRICING=true
+    ```
+    *Set to `false` to skip fetching electricity prices entirely. The "Thresholds" panel disappears from the TUI and web UI, and price-based decisions are not made. Heatpump and battery control are automatically force-disabled in this mode (both depend on price data). Useful when you only want a status / monitoring display.*
+
 ---
 
 ### **Heat Pump Control**

@@ -90,6 +90,7 @@ struct WeatherCache {
 struct Config {
     // General
     check_interval: time::Duration,
+    enable_pricing: bool,
     // Data source selection
     use_legacy_status: bool,
     use_huawei: bool,
@@ -152,6 +153,8 @@ struct AppState {
     expected_pv_kwh: f64,
     hourly_pv_kw: Vec<(f64, f64)>,
     hourly_heating_kw: Vec<(f64, f64)>,
+    show_thresholds: bool,
+    show_decisions: bool,
 }
 
 fn main() -> Result<()> {
@@ -251,13 +254,15 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Fetch price every hour
-            let needs_price_update =
-                last_price_fetch.map_or(true, |t| now.signed_duration_since(t).num_hours() >= 1);
+            if config.enable_pricing {
+                // Fetch price every hour
+                let needs_price_update =
+                    last_price_fetch.map_or(true, |t| now.signed_duration_since(t).num_hours() >= 1);
 
-            if needs_price_update {
-                prices.clear();
-                last_price_fetch = Some(now);
+                if needs_price_update {
+                    prices.clear();
+                    last_price_fetch = Some(now);
+                }
             }
 
             // Fallback empty weather if API fails on startup
@@ -271,6 +276,34 @@ fn main() -> Result<()> {
                 log::error!("Failed to fetch system status: {}", e);
                 SystemStatus::default()
             });
+
+            // Pricing disabled → skip price analysis entirely and just publish
+            // the live system status. Heatpump and battery control are forced off
+            // upstream, so there are no decisions to render either.
+            if !config.enable_pricing {
+                let _ = current_weather; // weather still fetched for future enable
+                let app_state = AppState {
+                    prices: vec![],
+                    current_price: 0.0,
+                    block_threshold: 0.0,
+                    low_price_threshold: 0.0,
+                    spike_threshold: 0.0,
+                    compressor_decision: CompressorState::Allowed,
+                    soc_decision: 0,
+                    system_status: current_status,
+                    status_message: String::new(),
+                    expected_pv_kwh: 0.0,
+                    hourly_pv_kw: vec![],
+                    hourly_heating_kw: vec![],
+                    show_thresholds: false,
+                    show_decisions: false,
+                };
+                if tx.send(Some(app_state)).is_err() {
+                    break;
+                }
+                thread::sleep(config.check_interval);
+                continue;
+            }
 
             // Run Analysis
             let result = run_price_analysis(
@@ -447,6 +480,9 @@ fn main() -> Result<()> {
                         hourly_heating_kw: hourly_heating_kw,
                         system_status: current_status,
                         status_message,
+                        show_thresholds: config.enable_pricing,
+                        show_decisions: config.enable_heatpump_control
+                            || config.enable_battery_control,
                     };
                     if tx.send(Some(app_state)).is_err() {
                         break;
@@ -523,17 +559,32 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
         )
         .split(f.area());
 
+    let show_thresholds = app_state.map(|s| s.show_thresholds).unwrap_or(true);
+    let show_decisions = app_state.map(|s| s.show_decisions).unwrap_or(true);
+
+    enum Panel {
+        Thresholds,
+        Status,
+        Decisions,
+    }
+    let mut panels: Vec<Panel> = Vec::with_capacity(3);
+    if show_thresholds {
+        panels.push(Panel::Thresholds);
+    }
+    panels.push(Panel::Status);
+    if show_decisions {
+        panels.push(Panel::Decisions);
+    }
+    let n = panels.len() as u32;
+    let constraints: Vec<Constraint> =
+        (0..n).map(|_| Constraint::Ratio(1, n)).collect();
     let bottom_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(
-            [
-                Constraint::Percentage(33),
-                Constraint::Percentage(33),
-                Constraint::Percentage(34),
-            ]
-            .as_ref(),
-        )
+        .constraints(constraints)
         .split(chunks[1]);
+    let panel_index = |target: &Panel| -> Option<usize> {
+        panels.iter().position(|p| std::mem::discriminant(p) == std::mem::discriminant(target))
+    };
 
     if let Some(state) = app_state {
         let (x_bounds, y_bounds, price_data, v_line_data, h_line_data, pv_data, heating_data) =
@@ -631,46 +682,49 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
     }
 
     // Block 1: Thresholds
-    let percentile_block = Block::default().title("Thresholds").borders(Borders::ALL);
-    let mut percentile_text = vec![];
-    if let Some(state) = app_state {
-        percentile_text.push(Line::from(vec![
-            Span::raw("Current: "),
-            Span::styled(
-                format!("{:.2}c", state.current_price),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        percentile_text.push(Line::from(vec![
-            Span::raw("Low < "),
-            Span::styled(
-                format!("{:.2}c", state.low_price_threshold),
-                Style::default().fg(Color::Green),
-            ),
-        ]));
-        percentile_text.push(Line::from(vec![
-            Span::raw("Block > "),
-            Span::styled(
-                format!("{:.2}c", state.block_threshold),
-                Style::default().fg(Color::Rgb(255, 165, 0)),
-            ),
-        ]));
-        percentile_text.push(Line::from(vec![
-            Span::raw("Spike > "),
-            Span::styled(
-                format!("{:.2}c", state.spike_threshold),
-                Style::default().fg(Color::Red),
-            ),
-        ]));
+    if let Some(idx) = panel_index(&Panel::Thresholds) {
+        let percentile_block = Block::default().title("Thresholds").borders(Borders::ALL);
+        let mut percentile_text = vec![];
+        if let Some(state) = app_state {
+            percentile_text.push(Line::from(vec![
+                Span::raw("Current: "),
+                Span::styled(
+                    format!("{:.2}c", state.current_price),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            percentile_text.push(Line::from(vec![
+                Span::raw("Low < "),
+                Span::styled(
+                    format!("{:.2}c", state.low_price_threshold),
+                    Style::default().fg(Color::Green),
+                ),
+            ]));
+            percentile_text.push(Line::from(vec![
+                Span::raw("Block > "),
+                Span::styled(
+                    format!("{:.2}c", state.block_threshold),
+                    Style::default().fg(Color::Rgb(255, 165, 0)),
+                ),
+            ]));
+            percentile_text.push(Line::from(vec![
+                Span::raw("Spike > "),
+                Span::styled(
+                    format!("{:.2}c", state.spike_threshold),
+                    Style::default().fg(Color::Red),
+                ),
+            ]));
+        }
+        f.render_widget(
+            Paragraph::new(percentile_text).block(percentile_block),
+            bottom_chunks[idx],
+        );
     }
-    f.render_widget(
-        Paragraph::new(percentile_text).block(percentile_block),
-        bottom_chunks[0],
-    );
 
-    // Block 2: Live System Status (NEW)
+    // Block 2: Live System Status (always shown)
+    let status_idx = panel_index(&Panel::Status).unwrap();
     let status_block = Block::default()
         .title("Live System Status")
         .borders(Borders::ALL);
@@ -733,56 +787,57 @@ fn ui(f: &mut Frame, app_state: Option<&AppState>) {
     }
     f.render_widget(
         Paragraph::new(status_text).block(status_block),
-        bottom_chunks[1],
+        bottom_chunks[status_idx],
     );
 
     // Block 3: Logic Decisions
-    let decision_block = Block::default().title("Decisions").borders(Borders::ALL);
-    let mut decision_text = vec![];
-    if let Some(state) = app_state {
-        let (comp_text, comp_style) = match state.compressor_decision {
-            CompressorState::Allowed => (
-                "Allowed",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            CompressorState::Blocked => (
-                "BLOCKED",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-        };
-        decision_text.push(Line::from(vec![
-            Span::raw("Heatpump: "),
-            Span::styled(comp_text, comp_style),
-        ]));
-        decision_text.push(Line::from(vec![
-            Span::raw("Set Min SOC: "),
-            Span::styled(
-                format!("{}%", state.soc_decision),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        decision_text.push(Line::from(Span::raw(" ")));
-        // Split status message if too long for box
-        let status_lines: Vec<&str> = state.status_message.split(" [").collect();
-        decision_text.push(Line::from(Span::styled(
-            status_lines[0],
-            Style::default().fg(Color::Yellow),
-        )));
-        if status_lines.len() > 1 {
+    if let Some(idx) = panel_index(&Panel::Decisions) {
+        let decision_block = Block::default().title("Decisions").borders(Borders::ALL);
+        let mut decision_text = vec![];
+        if let Some(state) = app_state {
+            let (comp_text, comp_style) = match state.compressor_decision {
+                CompressorState::Allowed => (
+                    "Allowed",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                CompressorState::Blocked => (
+                    "BLOCKED",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+            };
+            decision_text.push(Line::from(vec![
+                Span::raw("Heatpump: "),
+                Span::styled(comp_text, comp_style),
+            ]));
+            decision_text.push(Line::from(vec![
+                Span::raw("Set Min SOC: "),
+                Span::styled(
+                    format!("{}%", state.soc_decision),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            decision_text.push(Line::from(Span::raw(" ")));
+            let status_lines: Vec<&str> = state.status_message.split(" [").collect();
             decision_text.push(Line::from(Span::styled(
-                format!("[{}", status_lines[1]),
+                status_lines[0],
                 Style::default().fg(Color::Yellow),
             )));
+            if status_lines.len() > 1 {
+                decision_text.push(Line::from(Span::styled(
+                    format!("[{}", status_lines[1]),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
         }
+        f.render_widget(
+            Paragraph::new(decision_text).block(decision_block),
+            bottom_chunks[idx],
+        );
     }
-    f.render_widget(
-        Paragraph::new(decision_text).block(decision_block),
-        bottom_chunks[2],
-    );
 }
 
 fn prepare_chart_data(
@@ -1203,6 +1258,11 @@ impl AppState {
             expected_pv_kwh: 0.0,
             hourly_pv_kw: vec![],
             hourly_heating_kw: vec![],
+            // Conservative defaults: only used briefly on error paths, when
+            // panels we'd otherwise hide are likely the source of the error
+            // and the user wants to see the message.
+            show_thresholds: true,
+            show_decisions: true,
         }
     }
 }
@@ -1397,7 +1457,18 @@ fn load_config() -> Result<Config> {
     let use_legacy_status = parse_bool("USE_LEGACY_STATUS", "true")?;
     let use_huawei = parse_bool("USE_HUAWEI", "false")?;
     let use_solaredge = parse_bool("USE_SOLAREDGE", "false")?;
-    let enable_heatpump_control = parse_bool("ENABLE_HEATPUMP_CONTROL", "true")?;
+    let enable_pricing = parse_bool("USE_PRICING", "true")?;
+    let mut enable_heatpump_control = parse_bool("ENABLE_HEATPUMP_CONTROL", "true")?;
+    let mut enable_battery_control = parse_bool("ENABLE_BATTERY_CONTROL", "true")?;
+    if !enable_pricing {
+        if enable_heatpump_control || enable_battery_control {
+            log::warn!(
+                "USE_PRICING=false: forcing ENABLE_HEATPUMP_CONTROL and ENABLE_BATTERY_CONTROL off (both require price data)."
+            );
+        }
+        enable_heatpump_control = false;
+        enable_battery_control = false;
+    }
 
     let huawei_username = if use_huawei {
         env::var("HUAWEI_USERNAME").context("HUAWEI_USERNAME not set (required when USE_HUAWEI=true)")?
@@ -1424,6 +1495,7 @@ fn load_config() -> Result<Config> {
     };
 
     Ok(Config {
+        enable_pricing,
         use_legacy_status,
         use_huawei,
         use_solaredge,
@@ -1473,9 +1545,7 @@ fn load_config() -> Result<Config> {
         min_spike_difference_cents: env::var("MIN_SPIKE_DIFFERENCE_CENTS")
             .unwrap_or("10.0".into())
             .parse()?,
-        enable_battery_control: env::var("ENABLE_BATTERY_CONTROL")
-            .unwrap_or("true".into())
-            .parse()?,
+        enable_battery_control,
         ssh_host: env::var("SSH_HOST").context("SSH_HOST not set")?,
         ssh_user: env::var("SSH_USER").context("SSH_USER not set")?,
         ssh_pass: env::var("SSH_PASS").context("SSH_PASS not set")?,

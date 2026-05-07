@@ -237,7 +237,7 @@
         </div>
 
         <div class="grid-panels">
-            <div class="card">
+            <div class="card" id="card-thresholds">
                 <h2 class="panel-title">Thresholds</h2>
                 <div class="data-row">
                     <span class="data-label">Current Price</span>
@@ -408,7 +408,7 @@
                 </div>
             </div>
 
-            <div class="card">
+            <div class="card" id="card-decisions">
                 <h2 class="panel-title">Decisions</h2>
                 <div class="data-row">
                     <span class="data-label">Heatpump</span>
@@ -704,11 +704,19 @@
         function updateDOM(state) {
             document.getElementById('last-updated').innerText = `Last updated: ${new Date().toLocaleTimeString()}`;
 
+            // Visibility (default to shown if backend doesn't send the flag)
+            const showThresholds = state.show_thresholds !== false;
+            const showDecisions = state.show_decisions !== false;
+            document.getElementById('card-thresholds').style.display = showThresholds ? '' : 'none';
+            document.getElementById('card-decisions').style.display = showDecisions ? '' : 'none';
+
             // Thresholds
-            document.getElementById('val-curr-price').innerText = `${state.current_price.toFixed(2)} c`;
-            document.getElementById('val-low-price').innerText = `${state.low_price_threshold.toFixed(2)} c`;
-            document.getElementById('val-block-price').innerText = `${state.block_threshold.toFixed(2)} c`;
-            document.getElementById('val-spike-price').innerText = `${state.spike_threshold.toFixed(2)} c`;
+            if (showThresholds) {
+                document.getElementById('val-curr-price').innerText = `${state.current_price.toFixed(2)} c`;
+                document.getElementById('val-low-price').innerText = `${state.low_price_threshold.toFixed(2)} c`;
+                document.getElementById('val-block-price').innerText = `${state.block_threshold.toFixed(2)} c`;
+                document.getElementById('val-spike-price').innerText = `${state.spike_threshold.toFixed(2)} c`;
+            }
 
             // System Status
             let soc = state.system_status.soc;
@@ -756,12 +764,14 @@
             updateFlowConfig('flow-batt', battKw);
 
             // Decisions
-            let hpEl = document.getElementById('val-heatpump');
-            hpEl.innerText = state.compressor_decision;
-            hpEl.className = 'data-value ' + (state.compressor_decision === 'Allowed' ? 'value-green' : 'value-red');
+            if (showDecisions) {
+                let hpEl = document.getElementById('val-heatpump');
+                hpEl.innerText = state.compressor_decision;
+                hpEl.className = 'data-value ' + (state.compressor_decision === 'Allowed' ? 'value-green' : 'value-red');
 
-            document.getElementById('val-set-soc').innerText = `${state.soc_decision}%`;
-            document.getElementById('val-status-msg').innerText = state.status_message;
+                document.getElementById('val-set-soc').innerText = `${state.soc_decision}%`;
+                document.getElementById('val-status-msg').innerText = state.status_message;
+            }
 
             // Hide loading
             document.getElementById('loading').classList.add('hidden');
