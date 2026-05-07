@@ -27,9 +27,15 @@ Create a `.env` file in the same directory as the executable with the following 
 
 ---
 
-### **Shelly Relay Configuration**
+### **Heatpump / Shelly Relay Configuration**
 
-- **Local IP address of your Shelly Plus 1 relay:**  
+- **Enable heatpump control:**
+    ```env
+    ENABLE_HEATPUMP_CONTROL=true
+    ```
+    *Set to `false` to skip all relay control entirely. The price-based "would block" decision is still calculated and shown in the UI, but no commands are sent and `SHELLY_IP` is not required. Useful when you only want to use this program for battery / SOC management.*
+
+- **Local IP address of your Shelly Plus 1 relay:** *(required when `ENABLE_HEATPUMP_CONTROL=true`)*
     ```env
     SHELLY_IP="192.168.1.123"   # Example
     SHELLY_IP="YOUR_SHELLY_IP_HERE"
@@ -126,11 +132,36 @@ Create a `.env` file in the same directory as the executable with the following 
     WINTER_MIN_SOC=20
     ```
 
-- **Battery SOC status URL:**  
+### **Data Sources**
+
+You can pull live system data (SOC, PV, load, grid, battery power) from one or more sources. Multiple sources can be enabled at the same time and their results are combined: SOC / consumption / battery power are taken from Huawei (or Legacy if Huawei is not enabled), while PV production and grid power are summed across all enabled sources.
+
+- **Legacy status JSON URL (default source):**
     ```env
+    USE_LEGACY_STATUS=true
     STATUS_URL="http://192.168.178.11/status/soc.txt"
     ```
-    *URL to fetch the current battery state of charge (SOC) as a text file.*
+    *URL returning a JSON array of `{time, BatterySOC, PV, Consumption, Grid, BatteryPower}` samples (last entry is current). This is the source supported in earlier versions and remains the default.*
+
+- **Huawei FusionSolar Cloud API:**
+    ```env
+    USE_HUAWEI=false
+    HUAWEI_API_URL="https://eu5.fusionsolar.huawei.com"
+    HUAWEI_USERNAME="api_user"
+    HUAWEI_SYSTEM_CODE="api_password"
+    HUAWEI_STATION_CODE=""              # Optional; auto-discovered on first call if empty
+    HUAWEI_INVERT_GRID_SIGN=false       # Set to true if grid_power sign comes out reversed
+    ```
+    *Requires a Northbound API account on FusionSolar (request from your installer). Provides SOC, battery power, PV production, grid power, and a derived household consumption (PV + battery_discharge + grid_import). Pick the API URL closest to your account region (eu5, intl, na5, etc.).*
+
+- **SolarEdge Monitoring API:**
+    ```env
+    USE_SOLAREDGE=false
+    SOLAREDGE_API_URL="https://monitoringapi.solaredge.com"
+    SOLAREDGE_API_KEY="YOUR_KEY"
+    SOLAREDGE_SITE_ID="123456"
+    ```
+    *Uses the `currentPowerFlow` endpoint. Provides PV production and grid power (no battery / consumption). When combined with Huawei, both inverters' production and grid contributions are summed.*
 
 - **Site latitude (decimal degrees):**  
     ```env

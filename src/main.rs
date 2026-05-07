@@ -28,7 +28,10 @@ use std::{
     thread, time,
 };
 
+mod datasource;
 mod web;
+
+use datasource::{DataSources, HuaweiSource, LegacySource, SolarEdgeSource};
 
 /// Represents a single price point from the API.
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -39,33 +42,17 @@ struct PriceInfo {
 
 /// Represents the live status of the house/battery system.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct SystemStatus {
-    soc: u8,
-    pv_power: f64,
-    load_power: f64,
-    grid_power: f64,
-    battery_power: f64,
-    soc_histogram: Vec<(i64, f64)>,
-    pv_histogram: Vec<(i64, f64)>,
-    load_histogram: Vec<(i64, f64)>,
-    grid_histogram: Vec<(i64, f64)>,
-    battuse_histogram: Vec<(i64, f64)>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-#[allow(dead_code)]
-struct StatusDataPoint {
-    pub time: i64,
-    #[serde(rename = "BatterySOC")]
-    pub battery_soc: f64,
-    #[serde(rename = "PV")]
-    pub pv: f64,
-    #[serde(rename = "Consumption")]
-    pub consumption: f64,
-    #[serde(rename = "Grid")]
-    pub grid: f64,
-    #[serde(rename = "BatteryPower")]
+pub struct SystemStatus {
+    pub soc: u8,
+    pub pv_power: f64,
+    pub load_power: f64,
+    pub grid_power: f64,
     pub battery_power: f64,
+    pub soc_histogram: Vec<(i64, f64)>,
+    pub pv_histogram: Vec<(i64, f64)>,
+    pub load_histogram: Vec<(i64, f64)>,
+    pub grid_histogram: Vec<(i64, f64)>,
+    pub battuse_histogram: Vec<(i64, f64)>,
 }
 
 /// Represents the desired state of the heatpump compressor.
@@ -103,8 +90,24 @@ struct WeatherCache {
 struct Config {
     // General
     check_interval: time::Duration,
+    // Data source selection
+    use_legacy_status: bool,
+    use_huawei: bool,
+    use_solaredge: bool,
+    // Legacy status URL
     status_url: String,
-    // Relay settings
+    // Huawei FusionSolar
+    huawei_api_url: String,
+    huawei_username: String,
+    huawei_system_code: String,
+    huawei_station_code: Option<String>,
+    huawei_invert_grid_sign: bool,
+    // SolarEdge
+    solaredge_api_url: String,
+    solaredge_api_key: String,
+    solaredge_site_id: String,
+    // Heatpump / relay settings
+    enable_heatpump_control: bool,
     shelly_ip: String,
     relay_on_to_block: bool,
     // Relative Heatpump logic
@@ -180,11 +183,52 @@ fn main() -> Result<()> {
         let mut weather_cache: Option<WeatherCache> = None;
         let mut last_price_fetch: Option<DateTime<Utc>> = None;
 
-        if let Err(e) = control_relay(&config, CompressorState::Allowed, &client) {
-            let _ = tx.send(Some(AppState::new_with_status(format!(
-                "Startup relay error: {}",
-                e
-            ))));
+        let mut data_sources = DataSources::new(
+            if config.use_legacy_status {
+                Some(LegacySource {
+                    url: config.status_url.clone(),
+                })
+            } else {
+                None
+            },
+            if config.use_huawei {
+                Some(HuaweiSource::new(
+                    config.huawei_api_url.clone(),
+                    config.huawei_username.clone(),
+                    config.huawei_system_code.clone(),
+                    config.huawei_station_code.clone(),
+                    config.huawei_invert_grid_sign,
+                ))
+            } else {
+                None
+            },
+            if config.use_solaredge {
+                Some(SolarEdgeSource {
+                    api_url: config.solaredge_api_url.clone(),
+                    api_key: config.solaredge_api_key.clone(),
+                    site_id: config.solaredge_site_id.clone(),
+                })
+            } else {
+                None
+            },
+        );
+
+        if data_sources.legacy.is_none()
+            && data_sources.huawei.is_none()
+            && data_sources.solaredge.is_none()
+        {
+            log::warn!(
+                "No data source enabled. Set at least one of USE_LEGACY_STATUS, USE_HUAWEI, USE_SOLAREDGE."
+            );
+        }
+
+        if config.enable_heatpump_control {
+            if let Err(e) = control_relay(&config, CompressorState::Allowed, &client) {
+                let _ = tx.send(Some(AppState::new_with_status(format!(
+                    "Startup relay error: {}",
+                    e
+                ))));
+            }
         }
 
         loop {
@@ -222,12 +266,11 @@ fn main() -> Result<()> {
                 .map(|c| c.forecast.clone())
                 .unwrap_or_default();
 
-            // Fetch current system status (SOC, PV, etc.)
-            let current_status =
-                fetch_system_status(&client, &config.status_url).unwrap_or_else(|e| {
-                    log::error!("Failed to fetch system status: {}", e);
-                    SystemStatus::default()
-                });
+            // Fetch current system status (SOC, PV, etc.) from configured data sources.
+            let current_status = data_sources.fetch_status(&client).unwrap_or_else(|e| {
+                log::error!("Failed to fetch system status: {}", e);
+                SystemStatus::default()
+            });
 
             // Run Analysis
             let result = run_price_analysis(
@@ -272,62 +315,74 @@ fn main() -> Result<()> {
 
                     let mut status_message = battery_status_str;
 
-                    // Reset block timer if price-based decision allows running.
-                    if price_based_decision == CompressorState::Allowed {
-                        block_start_time = None;
-                    }
-
-                    // Timing logic overrides
-                    if let Some(rest_end) = rest_until_time {
-                        if now < rest_end {
-                            status_message = format!(
-                                "Resting until {}",
-                                rest_end.with_timezone(&Tz::CET).format("%H:%M")
-                            );
-                            final_compressor_decision = CompressorState::Allowed;
-                        } else {
-                            rest_until_time = None;
+                    if config.enable_heatpump_control {
+                        // Reset block timer if price-based decision allows running.
+                        if price_based_decision == CompressorState::Allowed {
+                            block_start_time = None;
                         }
-                    }
 
-                    // Check if the maximum block time has been exceeded.
-                    if let Some(block_start) = block_start_time {
-                        let block_duration = now.signed_duration_since(block_start);
-                        if block_duration > Duration::minutes(config.max_continuous_block_minutes) {
-                            status_message =
-                                format!("Max block exceeded ({}m)", block_duration.num_minutes());
-                            final_compressor_decision = CompressorState::Allowed;
+                        // Timing logic overrides
+                        if let Some(rest_end) = rest_until_time {
+                            if now < rest_end {
+                                status_message = format!(
+                                    "Resting until {}",
+                                    rest_end.with_timezone(&Tz::CET).format("%H:%M")
+                                );
+                                final_compressor_decision = CompressorState::Allowed;
+                            } else {
+                                rest_until_time = None;
+                            }
                         }
-                    }
 
-                    // Update timers on state change
-                    if final_compressor_decision != last_compressor_state {
-                        match (last_compressor_state, final_compressor_decision) {
-                            (CompressorState::Allowed, CompressorState::Blocked) => {
-                                // Only start a new block timer if we are not already in a block
-                                if block_start_time.is_none() {
-                                    block_start_time = Some(now);
+                        // Check if the maximum block time has been exceeded.
+                        if let Some(block_start) = block_start_time {
+                            let block_duration = now.signed_duration_since(block_start);
+                            if block_duration
+                                > Duration::minutes(config.max_continuous_block_minutes)
+                            {
+                                status_message = format!(
+                                    "Max block exceeded ({}m)",
+                                    block_duration.num_minutes()
+                                );
+                                final_compressor_decision = CompressorState::Allowed;
+                            }
+                        }
+
+                        // Update timers on state change
+                        if final_compressor_decision != last_compressor_state {
+                            match (last_compressor_state, final_compressor_decision) {
+                                (CompressorState::Allowed, CompressorState::Blocked) => {
+                                    if block_start_time.is_none() {
+                                        block_start_time = Some(now);
+                                    }
                                 }
+                                (CompressorState::Blocked, CompressorState::Allowed) => {
+                                    block_start_time = None;
+                                    rest_until_time = Some(
+                                        now + Duration::minutes(config.min_rest_time_minutes),
+                                    );
+                                }
+                                _ => {}
                             }
-                            (CompressorState::Blocked, CompressorState::Allowed) => {
-                                block_start_time = None;
-                                rest_until_time =
-                                    Some(now + Duration::minutes(config.min_rest_time_minutes));
-                            }
-                            _ => {}
                         }
-                    }
 
-                    // Send commands if state changed
-                    if final_compressor_decision != last_compressor_state {
-                        if let Err(e) = control_relay(&config, final_compressor_decision, &client) {
-                            let _ = tx.send(Some(AppState::new_with_status(format!(
-                                "Relay error: {}",
-                                e
-                            ))));
+                        // Send commands if state changed
+                        if final_compressor_decision != last_compressor_state {
+                            if let Err(e) =
+                                control_relay(&config, final_compressor_decision, &client)
+                            {
+                                let _ = tx.send(Some(AppState::new_with_status(format!(
+                                    "Relay error: {}",
+                                    e
+                                ))));
+                            }
                         }
+                        last_compressor_state = final_compressor_decision;
+                    } else {
+                        // Heatpump control disabled: surface the price-based decision but take
+                        // no action and run no timing state machine.
+                        final_compressor_decision = price_based_decision;
                     }
-                    last_compressor_state = final_compressor_decision;
 
                     // Handle Battery SOC State with OPTIMIZED value
                     if config.enable_battery_control && optimized_soc != last_soc_set {
@@ -399,7 +454,9 @@ fn main() -> Result<()> {
                 }
                 Err(e) => {
                     // On error, send status and ensure failsafe state
-                    if last_compressor_state == CompressorState::Blocked {
+                    if config.enable_heatpump_control
+                        && last_compressor_state == CompressorState::Blocked
+                    {
                         if control_relay(&config, CompressorState::Allowed, &client).is_ok() {
                             last_compressor_state = CompressorState::Allowed;
                             block_start_time = None;
@@ -1189,52 +1246,6 @@ fn get_force_charge_soc(config: &Config, now: DateTime<Utc>) -> u8 {
     }
 }
 
-/// Fetches the system status from the text file.
-fn fetch_system_status(client: &Client, url: &str) -> Result<SystemStatus> {
-    let response = client
-        .get(url)
-        .send()
-        .with_context(|| format!("Failed to connect to status URL: {}", url))?;
-
-    if !response.status().is_success() {
-        return Err(anyhow::anyhow!("Status URL returned {}", response.status()));
-    }
-
-    let payload: Vec<StatusDataPoint> = response.json().context("Failed to parse status JSON")?;
-
-    if payload.is_empty() {
-        return Err(anyhow::anyhow!("Status URL returned an empty array"));
-    }
-
-    let current = payload.last().unwrap();
-
-    let soc_histogram: Vec<(i64, f64)> = payload.iter().map(|p| (p.time, p.battery_soc)).collect();
-    let pv_histogram: Vec<(i64, f64)> = payload.iter().map(|p| (p.time, p.pv / 1000.0)).collect();
-    let consumption_histogram: Vec<(i64, f64)> = payload
-        .iter()
-        .map(|p| (p.time, p.consumption / 1000.0))
-        .collect();
-    let grid_histogram: Vec<(i64, f64)> =
-        payload.iter().map(|p| (p.time, p.grid / 1000.0)).collect();
-    let battuse_histogram: Vec<(i64, f64)> = payload
-        .iter()
-        .map(|p| (p.time, p.battery_power / 1000.0))
-        .collect();
-
-    Ok(SystemStatus {
-        soc: current.battery_soc as u8,
-        pv_power: current.pv / 1000.0,
-        load_power: current.consumption / 1000.0,
-        grid_power: current.grid / 1000.0,
-        battery_power: current.battery_power / 1000.0,
-        soc_histogram,
-        pv_histogram,
-        load_histogram: consumption_histogram,
-        grid_histogram,
-        battuse_histogram,
-    })
-}
-
 fn set_minimum_soc(config: &Config, soc: u8) -> Result<()> {
     log::info!("Set Minimum SOC to {}% on host {}", soc, config.ssh_host);
     let tcp = TcpStream::connect(format!("{}:22", config.ssh_host))
@@ -1377,12 +1388,63 @@ fn fetch_weather(config: &Config, client: &Client) -> Result<WeatherResponse> {
     Ok(response.json()?)
 }
 
+fn parse_bool(name: &str, default: &str) -> Result<bool> {
+    Ok(env::var(name).unwrap_or(default.to_string()).parse()?)
+}
+
 /// Loads configuration from environment variables.
 fn load_config() -> Result<Config> {
+    let use_legacy_status = parse_bool("USE_LEGACY_STATUS", "true")?;
+    let use_huawei = parse_bool("USE_HUAWEI", "false")?;
+    let use_solaredge = parse_bool("USE_SOLAREDGE", "false")?;
+    let enable_heatpump_control = parse_bool("ENABLE_HEATPUMP_CONTROL", "true")?;
+
+    let huawei_username = if use_huawei {
+        env::var("HUAWEI_USERNAME").context("HUAWEI_USERNAME not set (required when USE_HUAWEI=true)")?
+    } else {
+        env::var("HUAWEI_USERNAME").unwrap_or_default()
+    };
+    let huawei_system_code = if use_huawei {
+        env::var("HUAWEI_SYSTEM_CODE")
+            .context("HUAWEI_SYSTEM_CODE not set (required when USE_HUAWEI=true)")?
+    } else {
+        env::var("HUAWEI_SYSTEM_CODE").unwrap_or_default()
+    };
+    let solaredge_api_key = if use_solaredge {
+        env::var("SOLAREDGE_API_KEY")
+            .context("SOLAREDGE_API_KEY not set (required when USE_SOLAREDGE=true)")?
+    } else {
+        env::var("SOLAREDGE_API_KEY").unwrap_or_default()
+    };
+    let solaredge_site_id = if use_solaredge {
+        env::var("SOLAREDGE_SITE_ID")
+            .context("SOLAREDGE_SITE_ID not set (required when USE_SOLAREDGE=true)")?
+    } else {
+        env::var("SOLAREDGE_SITE_ID").unwrap_or_default()
+    };
+
     Ok(Config {
+        use_legacy_status,
+        use_huawei,
+        use_solaredge,
         status_url: env::var("STATUS_URL")
             .unwrap_or("http://192.168.178.11/status/soc.txt".to_string()),
-        shelly_ip: env::var("SHELLY_IP").context("SHELLY_IP not set")?,
+        huawei_api_url: env::var("HUAWEI_API_URL")
+            .unwrap_or("https://eu5.fusionsolar.huawei.com".to_string()),
+        huawei_username,
+        huawei_system_code,
+        huawei_station_code: env::var("HUAWEI_STATION_CODE").ok().filter(|s| !s.is_empty()),
+        huawei_invert_grid_sign: parse_bool("HUAWEI_INVERT_GRID_SIGN", "false")?,
+        solaredge_api_url: env::var("SOLAREDGE_API_URL")
+            .unwrap_or("https://monitoringapi.solaredge.com".to_string()),
+        solaredge_api_key,
+        solaredge_site_id,
+        enable_heatpump_control,
+        shelly_ip: if enable_heatpump_control {
+            env::var("SHELLY_IP").context("SHELLY_IP not set (required when ENABLE_HEATPUMP_CONTROL=true)")?
+        } else {
+            env::var("SHELLY_IP").unwrap_or_default()
+        },
         relay_on_to_block: env::var("RELAY_ON_TO_BLOCK")
             .unwrap_or("false".into())
             .parse()?,
