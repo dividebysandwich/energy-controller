@@ -231,21 +231,13 @@ fn handle_jsonrpc(request: &Value, snapshot: Option<&AppState>) -> Option<Value>
 /// The `tools/list` result: every tool the energy controller exposes.
 fn tools_list() -> Value {
     let metric_keys: Vec<&str> = HISTORY_METRICS.iter().map(|m| m.key).collect();
-    let metric_help: String = HISTORY_METRICS
-        .iter()
-        .map(|m| format!("'{}' ({}): {}", m.key, m.unit, m.description))
-        .collect::<Vec<_>>()
-        .join(" ");
 
     json!({
         "tools": [
             {
                 "name": "get_current_household_energy_status",
                 "description":
-                    "Get the most recent live snapshot of the home energy system: battery \
-                     state of charge, solar PV production, household consumption, grid \
-                     import/export and battery charge/discharge power. Returns a single \
-                     instantaneous reading (the newest available).",
+                    "Latest live reading: battery state of charge (%), solar PV, household load, grid and battery power (kW).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -254,22 +246,15 @@ fn tools_list() -> Value {
             },
             {
                 "name": "get_household_energy_history_24h",
-                "description": format!(
-                    "Get the rolling 24-hour time series of a household energy metric as \
-                     timestamped samples (oldest first). Each sample has an ISO-8601 UTC \
-                     timestamp and a numeric value in the metric's stated unit. Available \
-                     metrics: {}",
-                    metric_help
-                ),
+                "description":
+                    "Rolling 24h history (downsampled to <=48 samples) for one or all energy metrics. Each metric block states its unit.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "metric_name": {
                             "type": "string",
                             "enum": metric_keys,
-                            "description":
-                                "Which historical energy metric to return. If omitted, the \
-                                 history for every metric is returned."
+                            "description": "Metric to return; omit for all."
                         }
                     },
                     "additionalProperties": false
@@ -278,10 +263,7 @@ fn tools_list() -> Value {
             {
                 "name": "get_electricity_spot_price_forecast",
                 "description":
-                    "Get the EPEX/Spotty electricity spot-price forecast used for control \
-                     decisions: the current price, the per-day percentile thresholds the \
-                     controller uses, and the full list of upcoming hourly prices. All \
-                     prices are in euro-cents per kWh.",
+                    "Current electricity price, the controller's percentile thresholds, and upcoming hourly spot prices (euro-cents/kWh).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -291,10 +273,7 @@ fn tools_list() -> Value {
             {
                 "name": "get_solar_and_heating_power_forecast",
                 "description":
-                    "Get the forecasted hourly solar PV production (kW) and estimated \
-                     heating power demand (kW) for today and tomorrow, plus the total \
-                     expected PV energy yield for the rest of today (kWh). Derived from the \
-                     open-meteo weather forecast and the configured system sizes.",
+                    "Hourly solar PV production and estimated heating demand (kW) for today/tomorrow, plus expected remaining PV yield today (kWh).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -304,10 +283,7 @@ fn tools_list() -> Value {
             {
                 "name": "get_battery_and_heatpump_control_decisions",
                 "description":
-                    "Get the controller's current control decisions: the target battery \
-                     state of charge it is enforcing, whether the heat-pump compressor is \
-                     currently being allowed or blocked, and a human-readable status \
-                     message explaining why.",
+                    "Controller's current target battery SoC, heat-pump compressor allow/block decision, and status message.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -359,6 +335,31 @@ fn tool_text(text: &str) -> Value {
 fn tool_json(value: Value) -> Value {
     let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
     json!({ "content": [ { "type": "text", "text": text } ] })
+}
+
+/// Maximum number of points returned for any time series; longer series are
+/// downsampled to this many bucket-averaged points to keep responses compact.
+const MAX_SERIES_POINTS: usize = 48;
+
+/// Reduces a `(timestamp, value)` series to at most `MAX_SERIES_POINTS` evenly
+/// spaced buckets, averaging the timestamp and value within each bucket. Series
+/// already at or below the cap are returned unchanged.
+fn downsample(points: &[(i64, f64)]) -> Vec<(i64, f64)> {
+    let len = points.len();
+    if len <= MAX_SERIES_POINTS {
+        return points.to_vec();
+    }
+    (0..MAX_SERIES_POINTS)
+        .map(|b| {
+            let start = b * len / MAX_SERIES_POINTS;
+            let end = ((b + 1) * len / MAX_SERIES_POINTS).max(start + 1).min(len);
+            let bucket = &points[start..end];
+            let n = bucket.len() as f64;
+            let ts = (bucket.iter().map(|p| p.0).sum::<i64>() as f64 / n).round() as i64;
+            let value = bucket.iter().map(|p| p.1).sum::<f64>() / n;
+            (ts, value)
+        })
+        .collect()
 }
 
 /// Formats a millisecond UNIX timestamp as an ISO-8601 UTC string.
@@ -415,7 +416,7 @@ fn one_metric_history(state: &AppState, key: &str) -> Value {
     let meta = metric_meta(key).unwrap();
     let samples: Vec<Value> = history_series(state, key)
         .map(|series| {
-            series
+            downsample(series)
                 .iter()
                 .map(|(ts_ms, value)| {
                     json!({
@@ -465,13 +466,17 @@ fn energy_history_json(state: &AppState, metric: Option<&str>) -> Result<Value, 
 }
 
 fn price_forecast_json(state: &AppState) -> Value {
-    let prices: Vec<Value> = state
+    let price_points: Vec<(i64, f64)> = state
         .prices
         .iter()
-        .map(|p| {
+        .map(|p| (p.from.timestamp_millis(), p.price))
+        .collect();
+    let prices: Vec<Value> = downsample(&price_points)
+        .iter()
+        .map(|(ts_ms, price)| {
             json!({
-                "interval_start_utc": p.from.to_rfc3339(),
-                "price_euro_cents_per_kwh": p.price,
+                "interval_start_utc": iso_from_millis(*ts_ms),
+                "price_euro_cents_per_kwh": price,
             })
         })
         .collect();
@@ -494,22 +499,32 @@ fn price_forecast_json(state: &AppState) -> Value {
 }
 
 fn forecast_json(state: &AppState) -> Value {
-    let pv: Vec<Value> = state
+    // Forecast timestamps are whole UNIX seconds stored as f64; downsample on
+    // integer seconds, then format back to ISO-8601.
+    let pv_points: Vec<(i64, f64)> = state
         .hourly_pv_kw
+        .iter()
+        .map(|(ts_s, kw)| (*ts_s as i64, *kw))
+        .collect();
+    let pv: Vec<Value> = downsample(&pv_points)
         .iter()
         .map(|(ts_s, kw)| {
             json!({
-                "hour_start_utc": iso_from_seconds(*ts_s),
+                "hour_start_utc": iso_from_seconds(*ts_s as f64),
                 "forecast_pv_production_kw": kw,
             })
         })
         .collect();
-    let heating: Vec<Value> = state
+    let heating_points: Vec<(i64, f64)> = state
         .hourly_heating_kw
+        .iter()
+        .map(|(ts_s, kw)| (*ts_s as i64, *kw))
+        .collect();
+    let heating: Vec<Value> = downsample(&heating_points)
         .iter()
         .map(|(ts_s, kw)| {
             json!({
-                "hour_start_utc": iso_from_seconds(*ts_s),
+                "hour_start_utc": iso_from_seconds(*ts_s as f64),
                 "estimated_heating_demand_kw": kw,
             })
         })
@@ -636,6 +651,28 @@ mod tests {
         let first = &metrics[0]["samples"][0];
         assert_eq!(first["value"], 70.0);
         assert!(first["timestamp_utc"].as_str().unwrap().starts_with("2023-"));
+    }
+
+    #[test]
+    fn long_history_is_downsampled_to_48_points() {
+        let mut state = sample_state();
+        // 288 raw samples (24h at 5-min resolution) must collapse to 48.
+        state.system_status.soc_histogram = (0..288)
+            .map(|i| (1_700_000_000_000 + i as i64 * 300_000, 50.0 + (i % 10) as f64))
+            .collect();
+        let out = call(
+            "get_household_energy_history_24h",
+            json!({ "metric_name": "battery_state_of_charge_percent" }),
+            &state,
+        );
+        let metric = &out["metrics"][0];
+        assert_eq!(metric["sample_count"], 48);
+        assert_eq!(metric["samples"].as_array().unwrap().len(), 48);
+    }
+
+    #[test]
+    fn short_series_is_returned_unchanged() {
+        assert_eq!(downsample(&[(0, 1.0), (1, 2.0)]), vec![(0, 1.0), (1, 2.0)]);
     }
 
     #[test]
