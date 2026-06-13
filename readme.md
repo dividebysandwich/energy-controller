@@ -55,6 +55,13 @@ Create a `.env` file in the same directory as the executable with the following 
     ```env
     CHECK_INTERVAL_MINUTES=5
     ```
+    *How often the price/weather analysis and battery/heatpump decisions are re-evaluated.*
+
+- **Live status poll interval (seconds):**
+    ```env
+    STATUS_POLL_SECONDS=10
+    ```
+    *How often the live system status (battery SOC, PV, load, grid, battery power) is refreshed and pushed to the web UI, independent of the slower `CHECK_INTERVAL_MINUTES` analysis loop. The web UI's own refresh rate is matched to this value automatically. **Mind your data source's rate limit:** the SolarEdge cloud API allows only ~300 requests/day, so a 10-second poll (~8,640/day) will exhaust the quota in under an hour — for fast live updates use a non-rate-limited local source (legacy `STATUS_URL` / inverter Modbus). For SolarEdge-only setups keep this around 300 (5 min).*
 
 - **Enable price-based control:**
     ```env

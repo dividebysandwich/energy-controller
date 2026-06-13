@@ -797,7 +797,8 @@
         window.onload = () => {
             initChart();
             fetchState();
-            setInterval(fetchState, 60000); // Every minute
+            // Poll interval is injected from STATUS_POLL_SECONDS (live status cadence).
+            setInterval(fetchState, {{STATE_POLL_MS}});
         };
 
         // Redraw chart ONLY if screen size crosses the mobile/desktop threshold

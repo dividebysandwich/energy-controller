@@ -75,8 +75,21 @@ async fn index() -> Html<String> {
         context_path.pop();
     }
 
+    // Match the frontend poll cadence to the backend live-status cadence so the
+    // UI reflects new readings promptly without polling faster than they change.
+    let poll_secs: u64 = env::var("STATUS_POLL_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&s| s >= 1)
+        .unwrap_or(10);
+    let poll_ms = (poll_secs * 1000).to_string();
+
     let html_content = include_str!("static/index.html");
-    Html(html_content.replace("{{APP_CONTEXT_PATH}}", &context_path))
+    Html(
+        html_content
+            .replace("{{APP_CONTEXT_PATH}}", &context_path)
+            .replace("{{STATE_POLL_MS}}", &poll_ms),
+    )
 }
 
 async fn keypad() -> Html<String> {

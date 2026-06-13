@@ -10,6 +10,7 @@ use std::{
     env,
     io::Read,
     net::TcpStream,
+    sync::{Arc, Mutex},
     thread, time,
 };
 
@@ -76,6 +77,7 @@ struct WeatherCache {
 struct Config {
     // General
     check_interval: time::Duration,
+    status_poll_interval: time::Duration,
     enable_pricing: bool,
     // Data source selection
     use_legacy_status: bool,
@@ -150,7 +152,7 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_secs()
         .init();
-    let config = load_config()?;
+    let config = Arc::new(load_config()?);
 
     // Using watch channel explicitly from tokio
     let (tx, rx) = tokio::sync::watch::channel(None::<AppState>);
@@ -167,7 +169,20 @@ fn main() -> Result<()> {
         });
     });
 
+    // Latest live system status, refreshed by the fast status loop and consumed
+    // by the slower control loop. `None` until the first successful fetch.
+    let latest_status: Arc<Mutex<Option<SystemStatus>>> = Arc::new(Mutex::new(None));
+
+    // Fast status-polling loop: owns the data sources and refreshes the live
+    // system status every `status_poll_interval`, independent of the (slower)
+    // price/decision control loop, so the web UI stays close to real time.
+    spawn_status_loop(config.clone(), tx.clone(), rx.clone(), latest_status.clone());
+
+    let config_ctrl = config.clone();
+    let latest_status_ctrl = latest_status.clone();
     let controller = thread::spawn(move || {
+        let config = config_ctrl;
+        let latest_status = latest_status_ctrl;
         let client = Client::builder().use_rustls_tls().build().unwrap();
         let mut prices: VecDeque<PriceInfo> = VecDeque::new();
         let mut last_compressor_state = CompressorState::Allowed;
@@ -177,43 +192,13 @@ fn main() -> Result<()> {
         let mut weather_cache: Option<WeatherCache> = None;
         let mut last_price_fetch: Option<DateTime<Utc>> = None;
 
-        let mut data_sources = DataSources::new(
-            if config.use_legacy_status {
-                Some(LegacySource {
-                    url: config.status_url.clone(),
-                })
-            } else {
-                None
-            },
-            if config.use_huawei {
-                Some(HuaweiSource::new(
-                    config.huawei_api_url.clone(),
-                    config.huawei_username.clone(),
-                    config.huawei_system_code.clone(),
-                    config.huawei_station_code.clone(),
-                    config.huawei_invert_grid_sign,
-                ))
-            } else {
-                None
-            },
-            if config.use_solaredge {
-                Some(SolarEdgeSource {
-                    api_url: config.solaredge_api_url.clone(),
-                    api_key: config.solaredge_api_key.clone(),
-                    site_id: config.solaredge_site_id.clone(),
-                })
-            } else {
-                None
-            },
-        );
-
-        if data_sources.legacy.is_none()
-            && data_sources.huawei.is_none()
-            && data_sources.solaredge.is_none()
+        // Give the status loop a brief head start so the first analysis isn't
+        // run against an all-zero status (waits up to ~2 poll intervals).
+        let wait_deadline = Utc::now() + Duration::from_std(config.status_poll_interval).unwrap_or(Duration::seconds(10)) * 2;
+        while latest_status.lock().unwrap_or_else(|e| e.into_inner()).is_none()
+            && Utc::now() < wait_deadline
         {
-            log::warn!(
-                "No data source enabled. Set at least one of USE_LEGACY_STATUS, USE_HUAWEI, USE_SOLAREDGE."
-            );
+            thread::sleep(time::Duration::from_millis(200));
         }
 
         if config.enable_heatpump_control {
@@ -262,11 +247,13 @@ fn main() -> Result<()> {
                 .map(|c| c.forecast.clone())
                 .unwrap_or_default();
 
-            // Fetch current system status (SOC, PV, etc.) from configured data sources.
-            let current_status = data_sources.fetch_status(&client).unwrap_or_else(|e| {
-                log::error!("Failed to fetch system status: {}", e);
-                SystemStatus::default()
-            });
+            // Read the most recent live status published by the fast status loop
+            // (refreshed every `status_poll_interval`), rather than fetching here.
+            let current_status = latest_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or_default();
 
             // Pricing disabled → skip price analysis entirely and just publish
             // the live system status. Heatpump and battery control are forced off
@@ -512,6 +499,85 @@ fn main() -> Result<()> {
         log::error!("Control loop thread terminated unexpectedly: {:?}", e);
     }
     Ok(())
+}
+
+/// Spawns the fast status-polling loop. It owns the configured data sources and
+/// refreshes the live system status every `config.status_poll_interval`, storing
+/// it in `latest_status` (consumed by the control loop) and patching the
+/// published `AppState` so the web UI / MCP see near-real-time live values
+/// without waiting for the slower price/decision control loop.
+fn spawn_status_loop(
+    config: Arc<Config>,
+    tx: tokio::sync::watch::Sender<Option<AppState>>,
+    rx: tokio::sync::watch::Receiver<Option<AppState>>,
+    latest_status: Arc<Mutex<Option<SystemStatus>>>,
+) {
+    thread::spawn(move || {
+        let client = Client::builder().use_rustls_tls().build().unwrap();
+
+        let mut data_sources = DataSources::new(
+            if config.use_legacy_status {
+                Some(LegacySource {
+                    url: config.status_url.clone(),
+                })
+            } else {
+                None
+            },
+            if config.use_huawei {
+                Some(HuaweiSource::new(
+                    config.huawei_api_url.clone(),
+                    config.huawei_username.clone(),
+                    config.huawei_system_code.clone(),
+                    config.huawei_station_code.clone(),
+                    config.huawei_invert_grid_sign,
+                ))
+            } else {
+                None
+            },
+            if config.use_solaredge {
+                Some(SolarEdgeSource {
+                    api_url: config.solaredge_api_url.clone(),
+                    api_key: config.solaredge_api_key.clone(),
+                    site_id: config.solaredge_site_id.clone(),
+                })
+            } else {
+                None
+            },
+        );
+
+        if data_sources.legacy.is_none()
+            && data_sources.huawei.is_none()
+            && data_sources.solaredge.is_none()
+        {
+            log::warn!(
+                "No data source enabled. Set at least one of USE_LEGACY_STATUS, USE_HUAWEI, USE_SOLAREDGE."
+            );
+        }
+
+        log::info!(
+            "Live system status polling every {}s",
+            config.status_poll_interval.as_secs()
+        );
+
+        loop {
+            match data_sources.fetch_status(&client) {
+                Ok(status) => {
+                    *latest_status.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(status.clone());
+                    // Patch only the live-status portion of the latest published
+                    // state, preserving any prices/decisions the control loop set.
+                    let mut state = rx
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(|| AppState::live_bootstrap(&config));
+                    state.system_status = status;
+                    let _ = tx.send(Some(state));
+                }
+                Err(e) => log::error!("Failed to fetch system status: {}", e),
+            }
+            thread::sleep(config.status_poll_interval);
+        }
+    });
 }
 
 struct PriceThresholds {
@@ -845,6 +911,17 @@ impl AppState {
             show_decisions: true,
         }
     }
+
+    /// Minimal state used by the status loop before the control loop has
+    /// produced a full one: carries only live status, with panel visibility
+    /// matching the running mode.
+    fn live_bootstrap(config: &Config) -> Self {
+        let mut state = AppState::new_with_status(String::new());
+        state.show_thresholds = config.enable_pricing;
+        state.show_decisions =
+            config.enable_heatpump_control || config.enable_battery_control;
+        state
+    }
 }
 
 /// Determines the baseline Minimum SOC based on the season.
@@ -1105,6 +1182,16 @@ fn load_config() -> Result<Config> {
                 .unwrap_or("5".into())
                 .parse::<u64>()?
                 * 60,
+        ),
+        // How often the live system status (SOC/PV/load/grid/battery) is
+        // refreshed, independent of the slower price/decision control loop.
+        // Keep this within your data source's rate limits — e.g. SolarEdge's
+        // cloud API allows only ~300 requests/day, so do NOT poll it every 10s.
+        status_poll_interval: time::Duration::from_secs(
+            env::var("STATUS_POLL_SECONDS")
+                .unwrap_or("10".into())
+                .parse::<u64>()?
+                .max(1),
         ),
         block_price_percentile: env::var("BLOCK_PRICE_PERCENTILE")
             .unwrap_or("75.0".into())
