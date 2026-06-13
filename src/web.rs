@@ -26,7 +26,23 @@ pub async fn start_server(rx: watch::Receiver<Option<AppState>>) {
         .route("/", get(index))
         .route("/keypad", get(keypad))
         .nest("/api", api_router)
-        .with_state(rx);
+        .with_state(rx.clone());
+
+    // Mount the MCP (Model Context Protocol) server so LLM/agent clients can
+    // query live and historical energy data over SSE. It advertises an absolute
+    // POST endpoint, so it needs to know the externally-visible context path.
+    let enable_mcp = env::var("ENABLE_MCP")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    let app = if enable_mcp {
+        log::info!(
+            "MCP server enabled at {}/mcp/sse (SSE transport)",
+            if context_path.is_empty() { "" } else { &context_path }
+        );
+        app.merge(crate::mcp::router(rx, context_path.clone()))
+    } else {
+        app
+    };
 
     // If context_path is empty, nest at "/", else nest at context_path
     let app = if context_path.is_empty() {

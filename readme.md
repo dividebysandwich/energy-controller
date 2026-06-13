@@ -62,6 +62,41 @@ Create a `.env` file in the same directory as the executable with the following 
     ```
     *Set to `false` to skip fetching electricity prices entirely. The "Thresholds" panel disappears from the TUI and web UI, and price-based decisions are not made. Heatpump and battery control are automatically force-disabled in this mode (both depend on price data). Useful when you only want a status / monitoring display.*
 
+- **Enable MCP server:**
+    ```env
+    ENABLE_MCP=true
+    ```
+    *Set to `false` to disable the built-in MCP (Model Context Protocol) server. When enabled (the default), it is served on the same port as the web UI and lets MCP-capable LLM/agent clients query live and historical energy data.*
+
+---
+
+### **MCP Server (energy data for LLM / agent clients)**
+
+The program exposes a built-in [Model Context Protocol](https://modelcontextprotocol.io) server over the **HTTP + Server-Sent Events** transport, mounted on the same port as the web UI (`WEB_PORT`, default `8080`) under any configured `APP_CONTEXT_PATH`.
+
+- **SSE stream endpoint (connect here):** `http://<host>:<port>/mcp/sse`
+- **Message endpoint:** advertised automatically by the server as the first SSE `endpoint` event (`/mcp/messages?sessionId=...`).
+
+Example client config:
+
+```json
+{
+  "mcpServers": {
+    "energy-controller": {
+      "url": "http://192.168.1.50:8080/mcp/sse"
+    }
+  }
+}
+```
+
+**Exposed tools** (all powers in kW, prices in euro-cents per kWh; names and result fields are self-describing):
+
+- `get_current_household_energy_status` — latest live snapshot: battery state of charge (%), solar PV production, household consumption, grid power (±import/export), battery power (±discharge/charge).
+- `get_household_energy_history_24h` — rolling 24-hour timestamped time series for one or all metrics (`battery_state_of_charge_percent`, `solar_pv_production_kw`, `household_consumption_load_kw`, `grid_power_kw`, `battery_power_kw`).
+- `get_electricity_spot_price_forecast` — current price, the controller's percentile thresholds, and the upcoming hourly EPEX/Spotty prices.
+- `get_solar_and_heating_power_forecast` — forecasted hourly solar PV production and estimated heating demand, plus expected remaining PV yield for today (kWh).
+- `get_battery_and_heatpump_control_decisions` — the controller's current target SOC, heat-pump compressor allow/block decision, and status message.
+
 ---
 
 ### **Heat Pump Control**

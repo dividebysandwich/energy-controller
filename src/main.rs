@@ -29,6 +29,7 @@ use std::{
 };
 
 mod datasource;
+mod mcp;
 mod web;
 
 use datasource::{DataSources, HuaweiSource, LegacySource, SolarEdgeSource};
