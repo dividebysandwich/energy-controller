@@ -698,14 +698,15 @@ impl LiveSource {
         // Only the scalar current readings are taken from this source; the
         // histogram fields stay empty so the caller leaves the existing
         // historical data untouched. Values are already in kW (SOC in percent).
-        // This source reports battery DISCHARGE as positive, whereas the rest of
-        // the program uses positive = charging, so the battery sign is inverted.
+        // This source reports battery CHARGING as a positive `batteryuse`, which
+        // matches the rest of the program (positive = charging), so it is passed
+        // through unchanged.
         Ok(SystemStatus {
             soc: p.soc.round().clamp(0.0, 100.0) as u8,
             pv_power: p.pv,
             load_power: p.consumption,
             grid_power: p.grid,
-            battery_power: -p.batteryuse,
+            battery_power: p.batteryuse,
             soc_histogram: vec![],
             pv_histogram: vec![],
             load_histogram: vec![],
