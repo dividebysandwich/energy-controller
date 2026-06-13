@@ -211,6 +211,13 @@ You can pull live system data (SOC, PV, load, grid, battery power) from one or m
     ```
     *Uses the `currentPowerFlow` endpoint. Provides PV production and grid power (no battery / consumption). When combined with Huawei, both inverters' production and grid contributions are summed.*
 
+- **Fast live status source:**
+    ```env
+    USE_LIVE_STATUS=false
+    LIVE_STATUS_URL="https://hoxdna.org/getEnergy"
+    ```
+    *Optional fast-updating live source. The URL must return a JSON object with the current scalar readings `{ "soc": 79, "pv": 9.3, "consumption": 5.4, "grid": 0.2, "batteryuse": 4.2 }` (powers in kW, SOC in percent), refreshed every few seconds. When enabled, these values override **only** the live current readings (SOC, PV, load, grid, battery power) shown in the UI/API/MCP — the **historical charts keep coming from the other configured source(s)** (legacy/Huawei/SolarEdge and their in-process history). Combine it with another source for histograms, or run it alone if you only need live values. If disabled, behavior is unchanged. Pair with `STATUS_POLL_SECONDS` to control how often it's polled. The endpoint is expected to report battery **discharge as a positive** `batteryuse`; this is inverted internally to match the rest of the app (positive = charging). Grid is passed through (+ = import).*
+
 - **Site latitude (decimal degrees):**  
     ```env
     LATITUDE=50.0000

@@ -18,7 +18,7 @@ mod datasource;
 mod mcp;
 mod web;
 
-use datasource::{DataSources, HuaweiSource, LegacySource, SolarEdgeSource};
+use datasource::{DataSources, HuaweiSource, LegacySource, LiveSource, SolarEdgeSource};
 
 /// Represents a single price point from the API.
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -83,8 +83,11 @@ struct Config {
     use_legacy_status: bool,
     use_huawei: bool,
     use_solaredge: bool,
+    use_live_status: bool,
     // Legacy status URL
     status_url: String,
+    // Fast live status source (current scalar values only; histograms unchanged)
+    live_status_url: String,
     // Huawei FusionSolar
     huawei_api_url: String,
     huawei_username: String,
@@ -543,14 +546,22 @@ fn spawn_status_loop(
             } else {
                 None
             },
+            if config.use_live_status {
+                Some(LiveSource {
+                    url: config.live_status_url.clone(),
+                })
+            } else {
+                None
+            },
         );
 
         if data_sources.legacy.is_none()
             && data_sources.huawei.is_none()
             && data_sources.solaredge.is_none()
+            && data_sources.live.is_none()
         {
             log::warn!(
-                "No data source enabled. Set at least one of USE_LEGACY_STATUS, USE_HUAWEI, USE_SOLAREDGE."
+                "No data source enabled. Set at least one of USE_LEGACY_STATUS, USE_HUAWEI, USE_SOLAREDGE, USE_LIVE_STATUS."
             );
         }
 
@@ -1114,6 +1125,7 @@ fn load_config() -> Result<Config> {
     let use_legacy_status = parse_bool("USE_LEGACY_STATUS", "true")?;
     let use_huawei = parse_bool("USE_HUAWEI", "false")?;
     let use_solaredge = parse_bool("USE_SOLAREDGE", "false")?;
+    let use_live_status = parse_bool("USE_LIVE_STATUS", "false")?;
     let enable_pricing = parse_bool("USE_PRICING", "true")?;
     let mut enable_heatpump_control = parse_bool("ENABLE_HEATPUMP_CONTROL", "true")?;
     let mut enable_battery_control = parse_bool("ENABLE_BATTERY_CONTROL", "true")?;
@@ -1156,8 +1168,11 @@ fn load_config() -> Result<Config> {
         use_legacy_status,
         use_huawei,
         use_solaredge,
+        use_live_status,
         status_url: env::var("STATUS_URL")
             .unwrap_or("http://192.168.178.11/status/soc.txt".to_string()),
+        live_status_url: env::var("LIVE_STATUS_URL")
+            .unwrap_or("https://hoxdna.org/getEnergy".to_string()),
         huawei_api_url: env::var("HUAWEI_API_URL")
             .unwrap_or("https://eu5.fusionsolar.huawei.com".to_string()),
         huawei_username,

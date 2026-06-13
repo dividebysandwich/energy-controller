@@ -89,10 +89,29 @@ pub struct SolarEdgeSource {
     pub site_id: String,
 }
 
+/// A fast "live" status source: a URL returning a JSON object with the current
+/// scalar readings (`soc`, `pv`, `consumption`, `grid`, `batteryuse`), updated
+/// every few seconds. It provides ONLY the live current values — historical
+/// charts continue to come from the other configured sources. Powers are
+/// expected in kW and SOC in percent.
+pub struct LiveSource {
+    pub url: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct LiveStatusPayload {
+    soc: f64,
+    pv: f64,
+    consumption: f64,
+    grid: f64,
+    batteryuse: f64,
+}
+
 pub struct DataSources {
     pub legacy: Option<LegacySource>,
     pub huawei: Option<HuaweiSource>,
     pub solaredge: Option<SolarEdgeSource>,
+    pub live: Option<LiveSource>,
     history: VecDeque<HistorySample>,
 }
 
@@ -101,11 +120,13 @@ impl DataSources {
         legacy: Option<LegacySource>,
         huawei: Option<HuaweiSource>,
         solaredge: Option<SolarEdgeSource>,
+        live: Option<LiveSource>,
     ) -> Self {
         Self {
             legacy,
             huawei,
             solaredge,
+            live,
             history: VecDeque::new(),
         }
     }
@@ -162,23 +183,15 @@ impl DataSources {
             }
         }
 
-        if !have_legacy && !have_huawei && !have_solaredge {
-            return Err(anyhow!(
-                "all configured data sources failed: {}",
-                errors.join("; ")
-            ));
-        }
-        if !errors.is_empty() {
-            log::warn!("Some data sources failed: {}", errors.join("; "));
-        }
-
         // For non-legacy sources we accumulate a 24h rolling history in-process,
         // since neither the FusionSolar nor the SolarEdge endpoints we use return
         // power-vs-time history at the resolution this chart needs. When legacy is
         // combined with another source the live values are summed across systems,
         // so legacy's server-side histograms no longer match the displayed values
-        // and we replace them with the internal buffer too.
-        let any_non_legacy = self.huawei.is_some() || self.solaredge.is_some();
+        // and we replace them with the internal buffer too. This runs BEFORE the
+        // optional live override so the historical charts keep coming from these
+        // sources, not the live endpoint.
+        let any_non_legacy = have_huawei || have_solaredge;
         if any_non_legacy {
             let now_ms = Utc::now().timestamp_millis();
             self.history.push_back(HistorySample {
@@ -207,6 +220,34 @@ impl DataSources {
                 self.history.iter().map(|s| (s.ts_ms, s.grid_kw)).collect();
             status.battuse_histogram =
                 self.history.iter().map(|s| (s.ts_ms, s.battery_kw)).collect();
+        }
+
+        // Optional fast live source: overrides ONLY the current scalar readings
+        // (SOC, PV, load, grid, battery power). The histograms built above are
+        // left untouched, so historical charts keep their original data source.
+        let mut have_live = false;
+        if let Some(live) = &self.live {
+            match live.fetch(client) {
+                Ok(s) => {
+                    status.soc = s.soc;
+                    status.pv_power = s.pv_power;
+                    status.load_power = s.load_power;
+                    status.grid_power = s.grid_power;
+                    status.battery_power = s.battery_power;
+                    have_live = true;
+                }
+                Err(e) => errors.push(format!("live: {}", e)),
+            }
+        }
+
+        if !have_legacy && !have_huawei && !have_solaredge && !have_live {
+            return Err(anyhow!(
+                "all configured data sources failed: {}",
+                errors.join("; ")
+            ));
+        }
+        if !errors.is_empty() {
+            log::warn!("Some data sources failed: {}", errors.join("; "));
         }
 
         Ok(status)
@@ -632,6 +673,39 @@ impl SolarEdgeSource {
             load_power: 0.0,
             grid_power: signed_grid,
             battery_power: 0.0,
+            soc_histogram: vec![],
+            pv_histogram: vec![],
+            load_histogram: vec![],
+            grid_histogram: vec![],
+            battuse_histogram: vec![],
+        })
+    }
+}
+
+impl LiveSource {
+    fn fetch(&self, client: &Client) -> Result<SystemStatus> {
+        let response = client
+            .get(&self.url)
+            .send()
+            .with_context(|| format!("Failed to connect to live status URL: {}", self.url))?;
+        if !response.status().is_success() {
+            return Err(anyhow!("Live status URL returned {}", response.status()));
+        }
+        let p: LiveStatusPayload = response
+            .json()
+            .context("Failed to parse live status JSON")?;
+
+        // Only the scalar current readings are taken from this source; the
+        // histogram fields stay empty so the caller leaves the existing
+        // historical data untouched. Values are already in kW (SOC in percent).
+        // This source reports battery DISCHARGE as positive, whereas the rest of
+        // the program uses positive = charging, so the battery sign is inverted.
+        Ok(SystemStatus {
+            soc: p.soc.round().clamp(0.0, 100.0) as u8,
+            pv_power: p.pv,
+            load_power: p.consumption,
+            grid_power: p.grid,
+            battery_power: -p.batteryuse,
             soc_histogram: vec![],
             pv_histogram: vec![],
             load_histogram: vec![],
