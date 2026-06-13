@@ -79,12 +79,50 @@ const HISTORY_METRICS: &[HistoryMetric] = &[
     },
 ];
 
+/// Map of open SSE sessions to the channel that feeds their event stream.
+type Sessions = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Event>>>>;
+
+/// Locks a mutex, recovering the guard even if a previous holder panicked.
+/// Without this, a single panic while the lock was held would poison it and
+/// make every subsequent MCP request panic — i.e. the server would silently
+/// stop responding until restarted.
+fn lock_sessions(
+    sessions: &Mutex<HashMap<String, mpsc::UnboundedSender<Event>>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, mpsc::UnboundedSender<Event>>> {
+    sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Removes its session from the shared map when dropped. The guard is parked
+/// inside the SSE response stream, so when the client disconnects and the
+/// stream is dropped, the (now useless) session entry is cleaned up instead of
+/// leaking forever. Leaked sessions were the cause of the server gradually
+/// becoming unresponsive over time.
+struct SessionGuard {
+    session_id: String,
+    sessions: Sessions,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        let remaining = {
+            let mut map = lock_sessions(&self.sessions);
+            map.remove(&self.session_id);
+            map.len()
+        };
+        log::info!(
+            "MCP client disconnected (session {}); {} session(s) still open",
+            self.session_id,
+            remaining
+        );
+    }
+}
+
 /// Shared state for the MCP endpoints: a read handle on the latest controller
 /// snapshot, the set of open SSE sessions, and the externally-visible base path.
 #[derive(Clone)]
 struct McpState {
     app_rx: watch::Receiver<Option<AppState>>,
-    sessions: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Event>>>>,
+    sessions: Sessions,
     base_path: String,
 }
 
@@ -133,15 +171,25 @@ async fn open_sse_stream(
     );
     let _ = tx.send(Event::default().event("endpoint").data(endpoint));
 
-    state
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(session_id.clone(), tx);
-    log::info!("MCP client connected (session {})", session_id);
+    let open_count = {
+        let mut map = lock_sessions(&state.sessions);
+        map.insert(session_id.clone(), tx);
+        map.len()
+    };
+    log::info!(
+        "MCP client connected (session {}); {} session(s) open",
+        session_id,
+        open_count
+    );
 
-    let stream = stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|event| (Ok(event), rx))
+    // Park a SessionGuard inside the stream state. When the client disconnects,
+    // the stream is dropped, the guard is dropped, and the session is removed.
+    let guard = SessionGuard {
+        session_id,
+        sessions: state.sessions.clone(),
+    };
+    let stream = stream::unfold((rx, guard), |(mut rx, guard)| async move {
+        rx.recv().await.map(|event| (Ok(event), (rx, guard)))
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -170,13 +218,13 @@ async fn receive_message(
     let response = handle_jsonrpc(&request, snapshot.as_ref());
 
     if let Some(response) = response {
-        let sender = state.sessions.lock().unwrap().get(session_id).cloned();
+        let sender = lock_sessions(&state.sessions).get(session_id).cloned();
         match sender {
             Some(sender) => {
                 let event = Event::default().event("message").data(response.to_string());
                 if sender.send(event).is_err() {
                     // The SSE stream is gone; drop the dead session.
-                    state.sessions.lock().unwrap().remove(session_id);
+                    lock_sessions(&state.sessions).remove(session_id);
                     return (StatusCode::GONE, "session stream closed").into_response();
                 }
             }
@@ -758,6 +806,35 @@ mod tests {
     async fn sse_transport_accepts_trailing_slash() {
         let sse = run_round_trip("/mcp/sse/").await;
         assert!(sse.contains("\"protocolVersion\":\"2024-11-05\""), "got: {}", sse);
+    }
+
+    #[test]
+    fn session_guard_removes_session_on_drop() {
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        lock_sessions(&sessions).insert("sess-1".to_string(), tx);
+        assert_eq!(lock_sessions(&sessions).len(), 1);
+
+        let guard = SessionGuard {
+            session_id: "sess-1".to_string(),
+            sessions: sessions.clone(),
+        };
+        drop(guard); // simulates the SSE stream (and thus the client) going away
+        assert_eq!(lock_sessions(&sessions).len(), 0, "session was not cleaned up");
+    }
+
+    #[test]
+    fn lock_sessions_recovers_from_a_poisoned_mutex() {
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        let poisoner = sessions.clone();
+        // Poison the mutex by panicking while holding it.
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.lock().unwrap();
+            panic!("intentional panic to poison the mutex");
+        })
+        .join();
+        // A plain .lock().unwrap() would panic here; lock_sessions must not.
+        assert!(lock_sessions(&sessions).is_empty());
     }
 
     /// Reads the `endpoint` SSE event, POSTs an initialize request to it on a

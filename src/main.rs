@@ -1,21 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
 use chrono_tz::Tz;
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    prelude::Alignment,
-    style::{Color, Modifier, Style},
-    symbols,
-    text::{Line, Span},
-    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph},
-};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
@@ -23,7 +8,7 @@ use std::{
     cmp,
     collections::VecDeque,
     env,
-    io::{self, Read},
+    io::Read,
     net::TcpStream,
     thread, time,
 };
@@ -160,6 +145,11 @@ struct AppState {
 
 fn main() -> Result<()> {
     dotenv::dotenv().ok();
+    // Log to stderr. Defaults to `info`; override with the RUST_LOG env var
+    // (e.g. RUST_LOG=debug) for more detail.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_secs()
+        .init();
     let config = load_config()?;
 
     // Using watch channel explicitly from tokio
@@ -177,7 +167,7 @@ fn main() -> Result<()> {
         });
     });
 
-    thread::spawn(move || {
+    let controller = thread::spawn(move || {
         let client = Client::builder().use_rustls_tls().build().unwrap();
         let mut prices: VecDeque<PriceInfo> = VecDeque::new();
         let mut last_compressor_state = CompressorState::Allowed;
@@ -511,428 +501,17 @@ fn main() -> Result<()> {
         }
     });
 
-    // Setup TUI
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Run UI Loop
-    let mut app_state: Option<AppState> = None;
-    loop {
-        if let Some(state) = rx.borrow().clone() {
-            app_state = Some(state);
-        }
-        terminal.draw(|f| ui(f, app_state.as_ref()))?;
-        if crossterm::event::poll(time::Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
-                    break;
-                }
-            }
-        }
-    }
-
-    // Restore Terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
-}
-
-// UI Rendering
-
-fn ui(f: &mut Frame, app_state: Option<&AppState>) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        // Chart takes all available space, bottom boxes take exactly 8 lines
-        .constraints(
-            [
-                Constraint::Min(0), // Expands to fill remaining vertical space
-                Constraint::Length(8),
-            ]
-            .as_ref(),
-        )
-        .split(f.area());
-
-    let show_thresholds = app_state.map(|s| s.show_thresholds).unwrap_or(true);
-    let show_decisions = app_state.map(|s| s.show_decisions).unwrap_or(true);
-
-    enum Panel {
-        Thresholds,
-        Status,
-        Decisions,
-    }
-    let mut panels: Vec<Panel> = Vec::with_capacity(3);
-    if show_thresholds {
-        panels.push(Panel::Thresholds);
-    }
-    panels.push(Panel::Status);
-    if show_decisions {
-        panels.push(Panel::Decisions);
-    }
-    let n = panels.len() as u32;
-    let constraints: Vec<Constraint> =
-        (0..n).map(|_| Constraint::Ratio(1, n)).collect();
-    let bottom_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(chunks[1]);
-    let panel_index = |target: &Panel| -> Option<usize> {
-        panels.iter().position(|p| std::mem::discriminant(p) == std::mem::discriminant(target))
-    };
-
-    if let Some(state) = app_state {
-        let (x_bounds, y_bounds, price_data, v_line_data, h_line_data, pv_data, heating_data) =
-            prepare_chart_data(state);
-        let datasets = vec![
-            Dataset::default()
-                .name("Current")
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(
-                    Style::default()
-                        .fg(Color::LightMagenta)
-                        .add_modifier(Modifier::DIM),
-                )
-                .data(&h_line_data),
-            Dataset::default()
-                .name("Now")
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Green))
-                .data(&v_line_data),
-            Dataset::default()
-                .name("Heat Load")
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Red))
-                .data(&heating_data),
-            Dataset::default()
-                .name("PV Forecast")
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Yellow))
-                .data(&pv_data),
-            Dataset::default()
-                .name("Price")
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Cyan))
-                .data(&price_data),
-        ];
-
-        let now_str = Utc::now()
-            .with_timezone(&Tz::CET)
-            .format("%H:%M:%S")
-            .to_string();
-        let current_info_str = format!("Now: {} @ {:.2}c", now_str, state.current_price);
-
-        let chart = Chart::new(datasets)
-            .block(
-                Block::default()
-                    .title_top(Line::from("Price Data").alignment(Alignment::Left))
-                    .title_top(Line::from(current_info_str).alignment(Alignment::Right))
-                    .borders(Borders::ALL),
-            )
-            .x_axis(
-                Axis::default()
-                    .title("Time")
-                    .style(Style::default().fg(Color::Gray))
-                    .bounds(x_bounds)
-                    .labels(
-                        // FIXED: Added type annotation ::<Vec<Span>>
-                        x_bounds
-                            .iter()
-                            .step_by(8)
-                            .map(|&t| {
-                                Span::from(
-                                    DateTime::from_timestamp(t as i64, 0)
-                                        .unwrap()
-                                        .with_timezone(&Tz::CET)
-                                        .format("%H:%M")
-                                        .to_string(),
-                                )
-                            })
-                            .collect::<Vec<Span>>(),
-                    ),
-            )
-            .y_axis(
-                Axis::default()
-                    .title("c/kWh")
-                    .style(Style::default().fg(Color::Gray))
-                    .bounds(y_bounds)
-                    .labels(
-                        y_bounds
-                            .iter()
-                            .map(|&p| Span::from(format!("{:.1}", p)))
-                            .collect::<Vec<Span>>(),
-                    ),
-            );
-        f.render_widget(chart, chunks[0]);
-    } else {
-        f.render_widget(
-            Block::default().title("Loading...").borders(Borders::ALL),
-            chunks[0],
-        );
-    }
-
-    // Block 1: Thresholds
-    if let Some(idx) = panel_index(&Panel::Thresholds) {
-        let percentile_block = Block::default().title("Thresholds").borders(Borders::ALL);
-        let mut percentile_text = vec![];
-        if let Some(state) = app_state {
-            percentile_text.push(Line::from(vec![
-                Span::raw("Current: "),
-                Span::styled(
-                    format!("{:.2}c", state.current_price),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            percentile_text.push(Line::from(vec![
-                Span::raw("Low < "),
-                Span::styled(
-                    format!("{:.2}c", state.low_price_threshold),
-                    Style::default().fg(Color::Green),
-                ),
-            ]));
-            percentile_text.push(Line::from(vec![
-                Span::raw("Block > "),
-                Span::styled(
-                    format!("{:.2}c", state.block_threshold),
-                    Style::default().fg(Color::Rgb(255, 165, 0)),
-                ),
-            ]));
-            percentile_text.push(Line::from(vec![
-                Span::raw("Spike > "),
-                Span::styled(
-                    format!("{:.2}c", state.spike_threshold),
-                    Style::default().fg(Color::Red),
-                ),
-            ]));
-        }
-        f.render_widget(
-            Paragraph::new(percentile_text).block(percentile_block),
-            bottom_chunks[idx],
-        );
-    }
-
-    // Block 2: Live System Status (always shown)
-    let status_idx = panel_index(&Panel::Status).unwrap();
-    let status_block = Block::default()
-        .title("Live System Status")
-        .borders(Borders::ALL);
-    let mut status_text = vec![];
-    if let Some(state) = app_state {
-        status_text.push(Line::from(vec![
-            Span::raw("SOC: "),
-            Span::styled(
-                format!("{}%", state.system_status.soc),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        status_text.push(Line::from(vec![
-            Span::raw("PV: "),
-            Span::styled(
-                format!("{:.1} kW", state.system_status.pv_power),
-                Style::default().fg(Color::Yellow),
-            ),
-        ]));
-        status_text.push(Line::from(vec![
-            Span::raw("Exp PV: "),
-            Span::styled(
-                format!("{:.1} kWh", state.expected_pv_kwh),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::DIM),
-            ),
-        ]));
-        status_text.push(Line::from(vec![
-            Span::raw("Load: "),
-            Span::styled(
-                format!("{:.1} kW", state.system_status.load_power),
-                Style::default().fg(Color::Blue),
-            ),
-        ]));
-        status_text.push(Line::from(vec![
-            Span::raw("Grid: "),
-            Span::styled(
-                format!("{:.1} kW", state.system_status.grid_power),
-                Style::default().fg(if state.system_status.grid_power > 0.0 {
-                    Color::Red
-                } else {
-                    Color::Green
-                }),
-            ),
-        ]));
-        status_text.push(Line::from(vec![
-            Span::raw("Batt: "),
-            Span::styled(
-                format!("{:.1} kW", state.system_status.battery_power),
-                Style::default().fg(if state.system_status.battery_power < 0.0 {
-                    Color::Red
-                } else {
-                    Color::Green
-                }),
-            ),
-        ]));
-    }
-    f.render_widget(
-        Paragraph::new(status_text).block(status_block),
-        bottom_chunks[status_idx],
+    log::info!(
+        "Energy controller started; web/MCP server and control loop are running. \
+         Logging to stderr (set RUST_LOG=debug for more detail)."
     );
 
-    // Block 3: Logic Decisions
-    if let Some(idx) = panel_index(&Panel::Decisions) {
-        let decision_block = Block::default().title("Decisions").borders(Borders::ALL);
-        let mut decision_text = vec![];
-        if let Some(state) = app_state {
-            let (comp_text, comp_style) = match state.compressor_decision {
-                CompressorState::Allowed => (
-                    "Allowed",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                CompressorState::Blocked => (
-                    "BLOCKED",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ),
-            };
-            decision_text.push(Line::from(vec![
-                Span::raw("Heatpump: "),
-                Span::styled(comp_text, comp_style),
-            ]));
-            decision_text.push(Line::from(vec![
-                Span::raw("Set Min SOC: "),
-                Span::styled(
-                    format!("{}%", state.soc_decision),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            decision_text.push(Line::from(Span::raw(" ")));
-            let status_lines: Vec<&str> = state.status_message.split(" [").collect();
-            decision_text.push(Line::from(Span::styled(
-                status_lines[0],
-                Style::default().fg(Color::Yellow),
-            )));
-            if status_lines.len() > 1 {
-                decision_text.push(Line::from(Span::styled(
-                    format!("[{}", status_lines[1]),
-                    Style::default().fg(Color::Yellow),
-                )));
-            }
-        }
-        f.render_widget(
-            Paragraph::new(decision_text).block(decision_block),
-            bottom_chunks[idx],
-        );
+    // The control loop and the web/MCP server run on background threads and
+    // report their status through the log. Block here for the process lifetime.
+    if let Err(e) = controller.join() {
+        log::error!("Control loop thread terminated unexpectedly: {:?}", e);
     }
-}
-
-fn prepare_chart_data(
-    state: &AppState,
-) -> (
-    [f64; 2],
-    [f64; 2],
-    Vec<(f64, f64)>,
-    Vec<(f64, f64)>,
-    Vec<(f64, f64)>,
-    Vec<(f64, f64)>,
-    Vec<(f64, f64)>,
-) {
-    let now = Utc::now();
-    let today = now.with_timezone(&Tz::CET).date_naive();
-    let tomorrow = today.succ_opt().unwrap_or(today);
-
-    let relevant_prices: Vec<_> = state
-        .prices
-        .iter()
-        .filter(|p| {
-            let p_date = p.from.with_timezone(&Tz::CET).date_naive();
-            p_date == today || p_date == tomorrow
-        })
-        .collect();
-
-    if relevant_prices.is_empty() {
-        return (
-            [0.0, 1.0],
-            [0.0, 1.0],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-        );
-    }
-
-    let price_data: Vec<(f64, f64)> = relevant_prices
-        .iter()
-        .map(|p| (p.from.timestamp() as f64, p.price))
-        .collect();
-    let min_price = relevant_prices
-        .iter()
-        .map(|p| p.price)
-        .fold(f64::INFINITY, f64::min);
-    let max_price = relevant_prices
-        .iter()
-        .map(|p| p.price)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let y_bounds = [min_price * 0.95, max_price * 1.05];
-    let x_min = relevant_prices.first().unwrap().from.timestamp() as f64;
-    let x_max = relevant_prices.last().unwrap().from.timestamp() as f64;
-    let x_bounds = [x_min, x_max];
-    let now_ts = now.timestamp() as f64;
-    let v_line_data = vec![(now_ts, y_bounds[0]), (now_ts, y_bounds[1])];
-    let h_line_data = vec![
-        (x_bounds[0], state.current_price),
-        (x_bounds[1], state.current_price),
-    ];
-
-    let y_range = y_bounds[1] - y_bounds[0];
-
-    // PV Forecast Data
-    let pv_data: Vec<(f64, f64)> = state
-        .hourly_pv_kw
-        .iter()
-        .filter(|(ts, _)| *ts >= x_bounds[0] && *ts <= x_bounds[1])
-        .map(|(ts, kw)| {
-            let scaled_y = y_bounds[0] + (kw / 5.0) * y_range;
-            (*ts, scaled_y)
-        })
-        .collect();
-
-    // Expected heating graph
-    let heating_data: Vec<(f64, f64)> = state
-        .hourly_heating_kw
-        .iter()
-        .filter(|(ts, _)| *ts >= x_bounds[0] && *ts <= x_bounds[1])
-        .map(|(ts, kw)| {
-            let scaled_y = y_bounds[0] + (kw / 5.0) * y_range;
-            (*ts, scaled_y)
-        })
-        .collect();
-
-    (
-        x_bounds,
-        y_bounds,
-        price_data,
-        v_line_data,
-        h_line_data,
-        pv_data,
-        heating_data,
-    )
+    Ok(())
 }
 
 struct PriceThresholds {
