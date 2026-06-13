@@ -519,7 +519,7 @@ fn price_forecast_json(state: &AppState) -> Value {
         .iter()
         .map(|p| (p.from.timestamp_millis(), p.price))
         .collect();
-    let prices: Vec<Value> = downsample(&price_points)
+    let forecast: Vec<Value> = downsample(&price_points)
         .iter()
         .map(|(ts_ms, price)| {
             json!({
@@ -528,7 +528,8 @@ fn price_forecast_json(state: &AppState) -> Value {
             })
         })
         .collect();
-    json!({
+
+    let mut out = json!({
         "price_unit": "euro-cents per kWh",
         "current_price_euro_cents_per_kwh": state.current_price,
         "heatpump_block_threshold_euro_cents_per_kwh": state.block_threshold,
@@ -542,8 +543,30 @@ fn price_forecast_json(state: &AppState) -> Value {
             "battery_spike_threshold_euro_cents_per_kwh":
                 "A future price above this is treated as a major spike worth pre-charging for."
         },
-        "upcoming_prices": prices,
-    })
+        "hourly_spot_price_forecast_point_count": forecast.len(),
+        "hourly_spot_price_forecast": forecast,
+    });
+
+    // Make an empty forecast unambiguous so a client cannot mistake the
+    // (then meaningless) threshold fields for the only available price data.
+    if state.prices.is_empty() {
+        // `show_thresholds` mirrors the controller's `enable_pricing` flag.
+        out["forecast_availability_note"] = if state.show_thresholds {
+            json!(
+                "No spot-price forecast is currently available — the most recent price \
+                 fetch has not succeeded yet. The threshold and current-price values are \
+                 not meaningful until prices load."
+            )
+        } else {
+            json!(
+                "Electricity price handling is disabled on this controller \
+                 (USE_PRICING=false), so no spot prices are fetched. The current price and \
+                 all threshold fields are reported as 0 and carry no meaning. Set \
+                 USE_PRICING=true to enable the spot-price forecast."
+            )
+        };
+    }
+    out
 }
 
 fn forecast_json(state: &AppState) -> Value {
@@ -747,8 +770,21 @@ mod tests {
         let out = call("get_electricity_spot_price_forecast", json!({}), &state);
         assert_eq!(out["current_price_euro_cents_per_kwh"], 18.5);
         assert_eq!(out["heatpump_block_threshold_euro_cents_per_kwh"], 30.0);
-        assert_eq!(out["upcoming_prices"].as_array().unwrap().len(), 1);
-        assert_eq!(out["upcoming_prices"][0]["price_euro_cents_per_kwh"], 18.5);
+        assert_eq!(out["hourly_spot_price_forecast_point_count"], 1);
+        assert_eq!(out["hourly_spot_price_forecast"].as_array().unwrap().len(), 1);
+        assert_eq!(out["hourly_spot_price_forecast"][0]["price_euro_cents_per_kwh"], 18.5);
+        assert!(out.get("forecast_availability_note").is_none());
+    }
+
+    #[test]
+    fn price_forecast_explains_empty_forecast_when_pricing_disabled() {
+        let mut state = sample_state();
+        state.prices = vec![]; // pricing disabled path publishes no prices...
+        state.show_thresholds = false; // ...and clears show_thresholds
+        let out = call("get_electricity_spot_price_forecast", json!({}), &state);
+        assert_eq!(out["hourly_spot_price_forecast_point_count"], 0);
+        let note = out["forecast_availability_note"].as_str().unwrap();
+        assert!(note.contains("USE_PRICING=false"), "note was: {}", note);
     }
 
     #[test]
