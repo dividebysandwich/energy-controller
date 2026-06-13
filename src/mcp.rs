@@ -98,9 +98,14 @@ pub fn router(app_rx: watch::Receiver<Option<AppState>>, base_path: String) -> R
         sessions: Arc::new(Mutex::new(HashMap::new())),
         base_path,
     };
+    // Register both the bare and trailing-slash forms of each path. axum 0.7
+    // does not auto-redirect "/mcp/sse/" to "/mcp/sse", and many MCP clients
+    // (and humans) append a trailing slash, so accept either spelling.
     Router::new()
         .route("/mcp/sse", get(open_sse_stream))
+        .route("/mcp/sse/", get(open_sse_stream))
         .route("/mcp/messages", post(receive_message))
+        .route("/mcp/messages/", post(receive_message))
         .with_state(state)
 }
 
@@ -674,9 +679,9 @@ mod tests {
 
     /// End-to-end check of the actual HTTP+SSE transport: opens the SSE stream,
     /// reads the advertised endpoint, POSTs an `initialize` request and confirms
-    /// the JSON-RPC response arrives back as an SSE `message` event.
-    #[tokio::test]
-    async fn sse_transport_round_trip() {
+    /// the JSON-RPC response arrives back as an SSE `message` event. Parameterised
+    /// over the SSE path so we cover both the bare and trailing-slash spellings.
+    async fn run_round_trip(sse_path: &'static str) -> String {
         let (tx, rx) = watch::channel(Some(sample_state()));
         let _keep = tx; // keep the sender alive for the duration of the test
 
@@ -688,21 +693,34 @@ mod tests {
         });
 
         // Open the SSE stream on a blocking socket so we can read it line by line.
-        let sse = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let mut stream = TcpStream::connect(addr).unwrap();
             stream
                 .write_all(
-                    format!("GET /mcp/sse HTTP/1.1\r\nHost: {}\r\nAccept: text/event-stream\r\n\r\n", addr)
-                        .as_bytes(),
+                    format!(
+                        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: text/event-stream\r\n\r\n",
+                        sse_path, addr
+                    )
+                    .as_bytes(),
                 )
                 .unwrap();
             read_endpoint_and_then_post(stream, addr)
         })
         .await
-        .unwrap();
+        .unwrap()
+    }
 
+    #[tokio::test]
+    async fn sse_transport_round_trip() {
+        let sse = run_round_trip("/mcp/sse").await;
         assert!(sse.contains("\"protocolVersion\":\"2024-11-05\""), "got: {}", sse);
         assert!(sse.contains(MCP_SERVER_NAME));
+    }
+
+    #[tokio::test]
+    async fn sse_transport_accepts_trailing_slash() {
+        let sse = run_round_trip("/mcp/sse/").await;
+        assert!(sse.contains("\"protocolVersion\":\"2024-11-05\""), "got: {}", sse);
     }
 
     /// Reads the `endpoint` SSE event, POSTs an initialize request to it on a
